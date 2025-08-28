@@ -5,6 +5,8 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
 
+const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "vitaltrace.com.au";
+
 export async function GET(request: Request) {
   const requestUrl = new URL(request.url);
   const code = requestUrl.searchParams.get("code");
@@ -29,8 +31,21 @@ export async function GET(request: Request) {
       }
     );
 
-    // Exchange the auth code for a session and set HTTP-only cookies
+    // Exchange the code for a session so we can read the user
     await supabase.auth.exchangeCodeForSession(code);
+
+    // Fetch the authenticated user
+    const { data: { user } } = await supabase.auth.getUser();
+
+    // If user exists but email domain is not allowed, sign them out immediately
+    const email = user?.email || "";
+    const domain = email.split("@")[1] || "";
+    const allowed = domain.toLowerCase() === ALLOWED_DOMAIN.toLowerCase();
+
+    if (!allowed) {
+      await supabase.auth.signOut();
+      return NextResponse.redirect(new URL(`/login?error=not_allowed&domain=${domain}`, requestUrl.origin));
+    }
   }
 
   return NextResponse.redirect(new URL("/", requestUrl.origin));
