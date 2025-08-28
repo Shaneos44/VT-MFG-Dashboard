@@ -121,6 +121,15 @@ function SyncStatusIndicator({ syncStatus }: { syncStatus: SyncStatus }) {
   );
 }
 
+// put this near the top of the file with other helpers
+function toArray<T = string>(v: any): T[] {
+  if (Array.isArray(v)) return v as T[];
+  if (v === null || v === undefined) return [];
+  // if it’s a plain object, don’t wrap keys; stringify for the report
+  if (typeof v === "object") return [JSON.stringify(v)];
+  return [String(v)];
+}
+
 function CEOAnalysisButton({
   data,
   scenario,
