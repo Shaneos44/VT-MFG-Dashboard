@@ -1,32 +1,37 @@
+// app/api/signup/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { createClient as createAdminClient } from "@supabase/supabase-js";
 
-/**
- * Server-only signup. Creates a user instantly with email+password,
- * but ONLY if the email domain is allowed.
- *
- * Required env (server only, NOT public):
- * - SUPABASE_SERVICE_ROLE_KEY
- * - NEXT_PUBLIC_SUPABASE_URL
- * - ALLOWED_EMAIL_DOMAIN  (e.g. vitaltrace.com.au)
- */
+function parseAllowedDomains(raw: string | undefined) {
+  // Accept comma/space/newline-separated list; trim each
+  const s = (raw ?? "vitaltrace.com.au").trim().toLowerCase();
+  return s
+    .split(/[, \n\r\t;]+/)
+    .map((d) => d.trim())
+    .filter(Boolean);
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
-    const email = String(body.email || "").trim().toLowerCase();
-    const password = String(body.password || "");
+    const email: string = String(body.email || "").trim().toLowerCase();
+    const password: string = String(body.password || "");
 
     if (!email || !password) {
       return NextResponse.json({ error: "Email and password required" }, { status: 400 });
     }
 
-    const allowed = (process.env.ALLOWED_EMAIL_DOMAIN || "vitaltrace.com.au").toLowerCase();
-    const domain = (email.split("@")[1] || "").toLowerCase();
-    if (domain !== allowed) {
-      return NextResponse.json({ error: `Email domain not allowed: ${domain}` }, { status: 403 });
+    const domain = (email.split("@")[1] || "").trim().toLowerCase();
+    const allowedDomains = parseAllowedDomains(process.env.ALLOWED_EMAIL_DOMAIN);
+
+    if (!domain || !allowedDomains.includes(domain)) {
+      return NextResponse.json(
+        { error: `Email domain not allowed: ${domain}`, allowedDomains },
+        { status: 403 }
+      );
     }
 
     const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
@@ -35,9 +40,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Server not configured for signup" }, { status: 500 });
     }
 
-    const admin = createAdminClient(url, serviceKey, { auth: { autoRefreshToken: false, persistSession: false } });
+    const admin = createAdminClient(url, serviceKey, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
 
-    // Create user as confirmed so they can sign in immediately.
+    // Create user as confirmed so they can sign in immediately
     const { data, error } = await admin.auth.admin.createUser({
       email,
       password,
@@ -47,7 +54,7 @@ export async function POST(req: Request) {
     });
 
     if (error) {
-      // If the user already exists, return 200 so client can proceed to sign-in.
+      // If user already exists, allow client to proceed to sign-in
       if (String(error.message).toLowerCase().includes("already registered")) {
         return NextResponse.json({ ok: true, alreadyExists: true });
       }
