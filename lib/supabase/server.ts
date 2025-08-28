@@ -2,11 +2,11 @@ import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
 /**
- * Create a Supabase server client bound to the current request's cookies.
- * Always call this inside your route handler / server action.
+ * Supabase client for API routes / server actions.
+ * Uses Next.js cookies for session management.
  */
-export async function createClient() {
-  const cookieStore = await cookies();
+export function createClient() {
+  const cookieStore = cookies();
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
