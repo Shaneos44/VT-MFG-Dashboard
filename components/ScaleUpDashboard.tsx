@@ -415,57 +415,101 @@ const ScaleUpDashboardContent: React.FC = () => {
     meetingInsights: "",
   });
 
-  const exportWeeklySummary = () => {
-    const summary = generateWeeklySummary();
+  function toArray<T = string>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (value === null || value === undefined) return [];
+  if (typeof value === "object") return [JSON.stringify(value)];
+  return [String(value)];
+}
 
-    const reportContent = `
-WEEKLY PROJECT SUMMARY - ${summary.week}
+const exportWeeklySummary = () => {
+  const summary = (typeof generateWeeklySummary === "function" ? generateWeeklySummary() : {}) as any;
+
+  const weekLabel = String(summary?.week ?? new Date().toISOString().slice(0, 10));
+  const projectsCompleted = Number(summary?.projectsCompleted ?? 0);
+  const projectsOnTrack = Number(summary?.projectsOnTrack ?? 0);
+  const projectsAtRisk = Number(summary?.projectsAtRisk ?? 0);
+  const totalActiveProjects = projectsCompleted + projectsOnTrack + projectsAtRisk;
+
+  const keyMilestones = toArray<string>(summary?.keyMilestones);
+  const criticalIssues = toArray<string>(summary?.criticalIssues);
+  const nextWeekPriorities = toArray<string>(summary?.nextWeekPriorities);
+  const kpiSummary = toArray<{ name: string; current: number; target: number; trend: "up" | "down" | "stable" }>(
+    summary?.kpiSummary,
+  );
+
+  const tldr = analysis && typeof analysis.tldr === "string" && analysis.tldr.length > 0 ? analysis.tldr : "Analysis pending...";
+  const detailed =
+    analysis && typeof analysis.summary === "string" && analysis.summary.length > 0
+      ? analysis.summary
+      : "Detailed analysis will be available after CEO analysis is generated.";
+
+  const kpiLines =
+    kpiSummary.length > 0
+      ? kpiSummary
+          .map((kpi) => {
+            const name = typeof kpi?.name === "string" ? kpi.name : "KPI";
+            const current = Number((kpi as any)?.current ?? 0);
+            const target = Number((kpi as any)?.target ?? 0);
+            const trend =
+              (kpi as any)?.trend === "up" ? "↗️" : (kpi as any)?.trend === "down" ? "↘️" : "→";
+            return `• ${name}: ${current}/${target} ${trend}`;
+          })
+          .join("\n")
+      : "• —";
+
+  const milestoneLines = keyMilestones.length > 0 ? keyMilestones.map((m) => `• ${m}`).join("\n") : "• —";
+  const issuesLines =
+    criticalIssues.length > 0 ? criticalIssues.map((i) => `• ${i}`).join("\n") : "• No critical issues identified";
+  const priorityLines =
+    nextWeekPriorities.length > 0 ? nextWeekPriorities.map((p) => `• ${p}`).join("\n") : "• —";
+
+  const reportContent = `
+WEEKLY PROJECT SUMMARY - ${weekLabel}
 VitalTrace Manufacturing Scale-Up Dashboard
 Scenario: ${scenario} | Variant: ${variant}
 
 ═══════════════════════════════════════════════════════════════
 
 📊 PROJECT STATUS OVERVIEW
-• Projects Completed: ${summary.projectsCompleted}
-• Projects On Track: ${summary.projectsOnTrack}  
-• Projects At Risk: ${summary.projectsAtRisk}
-• Total Active Projects: ${summary.projectsCompleted + summary.projectsOnTrack + summary.projectsAtRisk}
+• Projects Completed: ${projectsCompleted}
+• Projects On Track: ${projectsOnTrack}
+• Projects At Risk: ${projectsAtRisk}
+• Total Active Projects: ${totalActiveProjects}
 
 🎯 KEY MILESTONES ACHIEVED
-${summary.keyMilestones.map((milestone) => `• ${milestone}`).join("\n")}
+${milestoneLines}
 
 ⚠️ CRITICAL ISSUES REQUIRING ATTENTION
-${summary.criticalIssues.length > 0 ? summary.criticalIssues.map((issue) => `• ${issue}`).join("\n") : "• No critical issues identified"}
+${issuesLines}
 
 📈 KPI PERFORMANCE SUMMARY
-${summary.kpiSummary
-  .map((kpi) => `• ${kpi.name}: ${kpi.current}/${kpi.target} ${kpi.trend === "up" ? "↗️" : kpi.trend === "down" ? "↘️" : "→"}`)
-  .join("\n")}
+${kpiLines}
 
 🚀 NEXT WEEK PRIORITIES
-${summary.nextWeekPriorities.map((priority) => `• ${priority}`).join("\n")}
+${priorityLines}
 
 ═══════════════════════════════════════════════════════════════
 
 📋 EXECUTIVE SUMMARY
-${analysis.tldr || "Analysis pending..."}
+${tldr}
 
 🔍 DETAILED ANALYSIS
-${analysis.summary || "Detailed analysis will be available after CEO analysis is generated."}
+${detailed}
 
 ═══════════════════════════════════════════════════════════════
 Generated: ${new Date().toLocaleString()}
 Dashboard Version: v63
-    `.trim();
+`.trim();
 
-    const blob = new Blob([reportContent], { type: "text/plain;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `Weekly_Summary_${summary.week}_${variant}_${scenario}.txt`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  const blob = new Blob([reportContent], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `Weekly_Summary_${weekLabel}_${variant}_${scenario}.txt`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
   const currentVariantData = useMemo(() => {
     const baseData =
