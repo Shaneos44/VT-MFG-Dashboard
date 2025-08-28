@@ -2,7 +2,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import jsPDF from "jspdf";
+import { jsPDF } from "jspdf";
 import { Button } from "@/components/ui/button";
 import { TrendingUp, Loader2, FileText } from "lucide-react";
 import { generateWeeklySummary } from "@/lib/utils";
