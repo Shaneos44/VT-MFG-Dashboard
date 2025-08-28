@@ -1,5 +1,7 @@
 "use client";
 
+// In your ScaleUpDashboard file, add this import at the top:
+import { normalizePlan, normalizeVariantData, toArray } from "@/lib/ensureArrays";
 import React, { useMemo, useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import {
