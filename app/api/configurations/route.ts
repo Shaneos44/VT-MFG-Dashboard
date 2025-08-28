@@ -1,8 +1,14 @@
+// app/api/configurations/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+
+function unauth(msg = "Not authenticated") {
+  // Normalize all auth failures to 401 instead of 500
+  return NextResponse.json({ error: msg }, { status: 401 });
+}
 
 /**
  * GET /api/configurations
@@ -17,11 +23,14 @@ export async function GET() {
       error: userErr,
     } = await supabase.auth.getUser();
 
+    // Treat "Auth session missing!" and any auth error as 401
     if (userErr) {
-      return NextResponse.json({ error: userErr.message }, { status: 500 });
+      console.error("[/api/configurations][GET] auth error:", userErr.message);
+      return unauth(userErr.message);
     }
     if (!user) {
-      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+      console.warn("[/api/configurations][GET] no user in session");
+      return unauth();
     }
 
     const { data, error } = await supabase
@@ -31,19 +40,21 @@ export async function GET() {
       .order("updated_at", { ascending: false });
 
     if (error) {
+      console.error("[/api/configurations][GET] db error:", error.message);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
     return NextResponse.json(data ?? []);
   } catch (err: any) {
+    console.error("[/api/configurations][GET] unexpected:", err?.message || err);
     return NextResponse.json({ error: err?.message ?? "Unexpected error" }, { status: 500 });
   }
 }
 
 /**
  * POST /api/configurations
- * Upserts a single named configuration for the authenticated user.
- * Expected body: { name: string, description?: string, data: any, modified_by?: string }
+ * Upserts a named configuration for the authenticated user.
+ * Body: { name?: string, description?: string, data: any, modified_by?: string }
  */
 export async function POST(req: Request) {
   try {
@@ -55,10 +66,12 @@ export async function POST(req: Request) {
     } = await supabase.auth.getUser();
 
     if (userErr) {
-      return NextResponse.json({ error: userErr.message }, { status: 500 });
+      console.error("[/api/configurations][POST] auth error:", userErr.message);
+      return unauth(userErr.message);
     }
     if (!user) {
-      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+      console.warn("[/api/configurations][POST] no user in session");
+      return unauth();
     }
 
     const body = await req.json();
@@ -68,7 +81,7 @@ export async function POST(req: Request) {
       name: String(body.name ?? "ScaleUp-Dashboard-Config"),
       description: body.description ?? null,
       data: body.data ?? {},
-      modified_by: body.email ?? user.email ?? "user",
+      modified_by: body.modified_by ?? user.email ?? "user",
     };
 
     const { data, error } = await supabase
@@ -78,11 +91,13 @@ export async function POST(req: Request) {
       .single();
 
     if (error) {
+      console.error("[/api/configurations][POST] db error:", error.message);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
     return NextResponse.json(data);
   } catch (err: any) {
+    console.error("[/api/configurations][POST] unexpected:", err?.message || err);
     return NextResponse.json({ error: err?.message ?? "Unexpected error" }, { status: 500 });
   }
 }
