@@ -1,3 +1,6 @@
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
@@ -7,7 +10,7 @@ import { createClient } from "@/lib/supabase/server";
  */
 export async function GET() {
   try {
-    const supabase = await createClient();
+    const supabase = createClient();
 
     const {
       data: { user },
@@ -44,7 +47,7 @@ export async function GET() {
  */
 export async function POST(req: Request) {
   try {
-    const supabase = await createClient();
+    const supabase = createClient();
 
     const {
       data: { user },
@@ -65,7 +68,7 @@ export async function POST(req: Request) {
       name: String(body.name ?? "ScaleUp-Dashboard-Config"),
       description: body.description ?? null,
       data: body.data ?? {},
-      modified_by: body.modified_by ?? (user.email ?? "user"),
+      modified_by: body.email ?? user.email ?? "user",
     };
 
     const { data, error } = await supabase
