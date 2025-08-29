@@ -9,9 +9,6 @@ import OverviewPanel from "@/components/OverviewPanel";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 
-/** =====================================================================
- * Types
- * ===================================================================== */
 type VariantName = "Recess Nanodispensing" | "Dipcoating" | string;
 type AnyRow = any[];
 
@@ -27,11 +24,7 @@ interface KPI {
   updated_at: string;
 }
 
-/** =====================================================================
- * Component
- * ===================================================================== */
 export default function ScaleUpDashboard() {
-  /** ---------------- Core state ---------------- */
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +92,6 @@ export default function ScaleUpDashboard() {
     return p;
   });
 
-  /** ---------------- Debounced autosave ---------------- */
   const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const queueSave = useCallback(() => {
     if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
@@ -108,7 +100,6 @@ export default function ScaleUpDashboard() {
     }, 1200);
   }, []);
 
-  /** ---------------- Derived current scenario data ---------------- */
   const currentVariantData = useMemo(() => {
     const base = plan?.products?.[scenario] || {
       projects: [],
@@ -134,7 +125,6 @@ export default function ScaleUpDashboard() {
     };
   }, [plan, scenario]);
 
-  /** ---------------- Load from DB (on mount only) ---------------- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -178,7 +168,6 @@ export default function ScaleUpDashboard() {
     };
   }, []);
 
-  /** ---------------- Save on changes ---------------- */
   useEffect(() => {
     if (loading) return;
     queueSave();
@@ -214,7 +203,6 @@ export default function ScaleUpDashboard() {
     }
   }, [plan, scenario, variant]);
 
-  /** ---------------- Tabs ---------------- */
   const tabs = [
     "Overview",
     "Projects",
@@ -229,11 +217,6 @@ export default function ScaleUpDashboard() {
   ] as const;
   const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>("Overview");
 
-  /** =====================================================================
-   * Accessors & Mutators (all write through plan -> autosave picks up)
-   * ===================================================================== */
-
-  // Projects
   const getProjects = (): AnyRow[] => (currentVariantData?.projects || []) as AnyRow[];
   const setProjects = (rows: AnyRow[]) => {
     setPlan((prev: any) => ({
@@ -287,7 +270,6 @@ export default function ScaleUpDashboard() {
     setProjects(rows);
   };
 
-  // Manufacturing processes
   const getProcesses = (): AnyRow[] => (currentVariantData?.processes || []) as AnyRow[];
   const setProcesses = (rows: AnyRow[]) => {
     setPlan((prev: any) => ({
@@ -313,7 +295,6 @@ export default function ScaleUpDashboard() {
     setProcesses(rows);
   };
 
-  // Resources
   const getResources = (): AnyRow[] => (currentVariantData?.resources || []) as AnyRow[];
   const setResources = (rows: AnyRow[]) => {
     setPlan((prev: any) => ({
@@ -339,7 +320,6 @@ export default function ScaleUpDashboard() {
     setResources(rows);
   };
 
-  // Risks
   const getRisks = (): AnyRow[] => (currentVariantData?.risks || []) as AnyRow[];
   const setRisks = (rows: AnyRow[]) => {
     setPlan((prev: any) => ({
@@ -365,7 +345,6 @@ export default function ScaleUpDashboard() {
     setRisks(rows);
   };
 
-  // Meetings
   const getMeetings = (): AnyRow[] => (currentVariantData?.meetings || []) as AnyRow[];
   const setMeetings = (rows: AnyRow[]) => {
     setPlan((prev: any) => ({
@@ -404,7 +383,6 @@ export default function ScaleUpDashboard() {
     setMeetings(rows);
   };
 
-  // CAPEX / OPEX
   const getCapexRows = (): AnyRow[] =>
     (scenario === "50k" ? currentVariantData.capex50k : currentVariantData.capex200k) || [];
   const setCapexRows = (rows: AnyRow[]) => {
@@ -469,7 +447,6 @@ export default function ScaleUpDashboard() {
     setOpexRows(rows);
   };
 
-  // KPIs (store in plan.kpis to persist)
   const getKpis = (): KPI[] => (Array.isArray(plan?.kpis) ? plan.kpis : []) as KPI[];
   const setKpis = (rows: KPI[]) => {
     setPlan((prev: any) => ({ ...prev, kpis: rows }));
@@ -498,7 +475,6 @@ export default function ScaleUpDashboard() {
     setKpis(rows);
   };
 
-  // Glossary (plan.glossary)
   const getGlossary = (): AnyRow[] => (Array.isArray(plan?.glossary) ? plan.glossary : []);
   const setGlossary = (rows: AnyRow[]) => setPlan((prev: any) => ({ ...prev, glossary: rows }));
   const addGlossary = () => {
@@ -519,9 +495,6 @@ export default function ScaleUpDashboard() {
     setGlossary(rows);
   };
 
-  /** =====================================================================
-   * Meeting Modal
-   * ===================================================================== */
   const [showMeetingModal, setShowMeetingModal] = useState(false);
   const [editingMeetingIndex, setEditingMeetingIndex] = useState<number | null>(null);
   const [meetingForm, setMeetingForm] = useState({
@@ -530,11 +503,11 @@ export default function ScaleUpDashboard() {
     date: new Date().toISOString().split("T")[0],
     time: "10:00",
     duration: "60 min",
-    attendees: "Team",
+    attendees: "Project Team, Stakeholders",
     location: "Conference Room / Zoom",
     status: "Scheduled",
     agenda: "1. Welcome\n2. Updates\n3. Risks & Blockers\n4. Decisions\n5. Actions",
-    objectives: "Share status, align priorities, unblock issues",
+    objectives: "Review progress and align priorities",
     notes: "",
   });
 
@@ -653,55 +626,195 @@ export default function ScaleUpDashboard() {
     doc.save(`Meeting_${title.replace(/\s+/g, "_")}_${date}.pdf`);
   };
 
-  /** =====================================================================
-   * Lightweight input cells
-   * ===================================================================== */
-  const TextCell = ({
-    value,
-    onChange,
-    className = "w-full rounded-md border bg-background px-2 py-1 text-sm",
-    type = "text",
-  }: {
-    value: any;
-    onChange: (v: string) => void;
-    className?: string;
-    type?: string;
-  }) => (
-    <input value={value ?? ""} onChange={(e) => onChange(e.target.value)} type={type} className={className} />
-  );
+  function sumCapexTotal(rows: AnyRow[]): number {
+    return rows.reduce((sum, r) => {
+      const qty = Number(r?.[1]) || 0;
+      const unit = Number(r?.[2]) || 0;
+      const install = Number(r?.[3]) || 0;
+      return sum + qty * unit + install;
+    }, 0);
+  }
 
-  const NumCell = ({
-    value,
-    onChange,
-    className = "w-full rounded-md border bg-background px-2 py-1 text-sm",
-  }: {
-    value: any;
-    onChange: (v: number) => void;
-    className?: string;
-  }) => (
-    <input
-      value={value ?? 0}
-      onChange={(e) => onChange(Number(e.target.value) || 0)}
-      type="number"
-      className={className}
-    />
-  );
+  function sumOpexTotal(rows: AnyRow[]): number {
+    return rows.reduce((sum, r) => {
+      const qty = Number(r?.[2]) || 0;
+      const unit = Number(r?.[3]) || 0;
+      return sum + qty * unit;
+    }, 0);
+  }
 
-  const DateCell = ({
-    value,
-    onChange,
-    className = "w-full rounded-md border bg-background px-2 py-1 text-sm",
-  }: {
-    value: any;
-    onChange: (v: string) => void;
-    className?: string;
-  }) => (
-    <input value={value ? String(value) : ""} onChange={(e) => onChange(e.target.value)} type="date" className={className} />
-  );
+  const generateCEOReportPDF = () => {
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const left = 40;
+    let y = 56;
 
-  /** =====================================================================
-   * Rendering
-   * ===================================================================== */
+    const projects = getProjects();
+    const processes = getProcesses();
+    const risks = getRisks();
+    const kpis = getKpis();
+
+    const capexRows = scenario === "50k" ? currentVariantData.capex50k || [] : currentVariantData.capex200k || [];
+    const opexRows = scenario === "50k" ? currentVariantData.opex50k || [] : currentVariantData.opex200k || [];
+
+    const capexTotal = sumCapexTotal(capexRows);
+    const opexTotal = sumOpexTotal(opexRows);
+
+    const sc = plan?.scenarios?.[scenario] || { unitsPerYear: scenario === "50k" ? 50000 : 200000, hoursPerDay: 8, shifts: 1 };
+    const pricePerUnit = 45;
+    const revenue = (sc.unitsPerYear || 0) * pricePerUnit;
+    const cpu = sc.unitsPerYear ? opexTotal / sc.unitsPerYear : 0;
+    const grossProfit = revenue - (capexTotal + opexTotal);
+    const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
+
+    const totalProjects = projects.length;
+    const completedProjects = projects.filter((p) => (Number(p?.[19]) || 0) >= 100).length;
+    const statusCol = 22;
+    const onTrack = projects.filter((p) => String(p?.[statusCol] || "").toUpperCase() === "GREEN").length;
+    const atRisk = projects.filter((p) => {
+      const s = String(p?.[statusCol] || "").toUpperCase();
+      return s === "RED" || s === "AMBER";
+    }).length;
+
+    const avgKpiPerformance =
+      kpis.length > 0
+        ? kpis.reduce((acc, k) => acc + (k.target_value ? (k.current_value / k.target_value) * 100 : 0), 0) / kpis.length
+        : 0;
+
+    doc.setFontSize(18);
+    doc.text(`CEO Executive Summary — ${variant} / ${scenario}`, left, y);
+    y += 20;
+    doc.setFontSize(11);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, left, y);
+    y += 18;
+
+    autoTable(doc, {
+      startY: y,
+      head: [["Metric", "Value"]],
+      body: [
+        ["Target Output (units/yr)", (sc.unitsPerYear || 0).toLocaleString()],
+        ["CapEx Total (USD)", `$${capexTotal.toLocaleString()}`],
+        ["OpEx Total (USD)", `$${opexTotal.toLocaleString()}`],
+        ["Cost / Unit (OpEx only)", `$${cpu.toFixed(2)}`],
+        ["Revenue (USD, est.)", `$${revenue.toLocaleString()}`],
+        ["Gross Profit (USD, est.)", `$${grossProfit.toLocaleString()}`],
+        ["Profit Margin (%)", `${marginPct.toFixed(1)}%`],
+        ["Projects — Total / Completed / On-Track / At-Risk", `${totalProjects} / ${completedProjects} / ${onTrack} / ${atRisk}`],
+        ["KPIs — Avg Performance", `${avgKpiPerformance.toFixed(1)}%`],
+        ["Risks — Total", `${risks.length}`],
+      ],
+      styles: { fontSize: 10, cellPadding: 6, valign: "top" },
+      headStyles: { fillColor: [15, 23, 42] },
+      columnStyles: {
+        0: { cellWidth: 260 },
+        1: { cellWidth: 260 },
+      },
+      margin: { left },
+      theme: "grid",
+    });
+
+    let afterSummaryY = (doc as any).lastAutoTable.finalY + 24;
+
+    autoTable(doc, {
+      startY: afterSummaryY,
+      head: [["KPI", "Current", "Target", "Δ Var (%)", "Owner"]],
+      body: kpis.map((k) => [
+        k.name,
+        `${k.current_value} ${k.unit}`,
+        `${k.target_value} ${k.unit}`,
+        k.target_value ? (((k.current_value - k.target_value) / k.target_value) * 100).toFixed(1) : "0.0",
+        k.owner,
+      ]),
+      styles: { fontSize: 9, cellPadding: 5 },
+      headStyles: { fillColor: [15, 23, 42] },
+      columnStyles: {
+        0: { cellWidth: 220 },
+        1: { cellWidth: 100 },
+        2: { cellWidth: 100 },
+        3: { cellWidth: 80 },
+        4: { cellWidth: 120 },
+      },
+      margin: { left },
+      theme: "striped",
+      didDrawPage: (data) => {
+        doc.setFontSize(12);
+        doc.text("KPI Dashboard", left, data.settings.startY - 8);
+      },
+    });
+
+    let afterKpiY = (doc as any).lastAutoTable.finalY + 24;
+
+    const projectBody = projects.slice(0, 20).map((p) => [
+      String(p?.[1] || ""),
+      String(p?.[4] || ""),
+      String(p?.[6] || ""),
+      String(p?.[22] || ""),
+      `${Number(p?.[19] || 0)}%`,
+    ]);
+
+    autoTable(doc, {
+      startY: afterKpiY,
+      head: [["Project", "Owner", "Finish", "Status", "Progress"]],
+      body: projectBody,
+      styles: { fontSize: 9, cellPadding: 5, overflow: "linebreak" },
+      headStyles: { fillColor: [15, 23, 42] },
+      columnStyles: {
+        0: { cellWidth: 240 },
+        1: { cellWidth: 120 },
+        2: { cellWidth: 90 },
+        3: { cellWidth: 80 },
+        4: { cellWidth: 50 },
+      },
+      margin: { left },
+      theme: "striped",
+      didDrawPage: (data) => {
+        doc.setFontSize(12);
+        doc.text("Top Projects", left, data.settings.startY - 8);
+      },
+    });
+
+    let afterProjectsY = (doc as any).lastAutoTable.finalY + 24;
+
+    const riskBody = risks.slice(0, 15).map((r) => [
+      String(r?.[0] || ""),
+      String(r?.[1] || ""),
+      String(r?.[2] || ""),
+      String(r?.[3] || ""),
+      String(r?.[4] || ""),
+      String(r?.[5] || ""),
+      String(r?.[7] || ""),
+    ]);
+
+    autoTable(doc, {
+      startY: afterProjectsY,
+      head: [["ID", "Risk", "Impact", "Prob", "Mitigation", "Owner", "Status"]],
+      body: riskBody,
+      styles: { fontSize: 9, cellPadding: 5, overflow: "linebreak" },
+      headStyles: { fillColor: [15, 23, 42] },
+      columnStyles: {
+        0: { cellWidth: 70 },
+        1: { cellWidth: 210 },
+        2: { cellWidth: 60 },
+        3: { cellWidth: 60 },
+        4: { cellWidth: 180 },
+        5: { cellWidth: 80 },
+        6: { cellWidth: 60 },
+      },
+      margin: { left },
+      theme: "striped",
+      didDrawPage: (data) => {
+        doc.setFontSize(12);
+        doc.text("Key Risks", left, data.settings.startY - 8);
+      },
+    });
+
+    const fileName = `CEO_Summary_${variant.replace(/\s+/g, "_")}_${scenario}_${new Date()
+      .toISOString()
+      .slice(0, 10)}.pdf`;
+    doc.save(fileName);
+  };
+
+  const [showMeetingModal, setShowMeetingModalState] = useState(false); // to keep TS happy if shadowed (noop)
+
   if (loading) {
     return (
       <div className="min-h-[50vh] grid place-items-center">
@@ -742,7 +855,6 @@ export default function ScaleUpDashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Top bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold">Scale-Up Dashboard</h1>
@@ -768,9 +880,13 @@ export default function ScaleUpDashboard() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" onClick={() => saveProjectDataToDatabase()} className="gap-2">
             <Save className="h-4 w-4" /> Save now
+          </Button>
+          <Button onClick={generateCEOReportPDF} className="gap-2">
+            <FileText className="h-4 w-4" />
+            CEO Summary
           </Button>
           {saving ? (
             <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-600">
@@ -783,7 +899,6 @@ export default function ScaleUpDashboard() {
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="flex flex-wrap gap-2">
         {tabs.map((t) => (
           <button
@@ -798,9 +913,7 @@ export default function ScaleUpDashboard() {
         ))}
       </div>
 
-      {/* Content */}
       <div className="rounded-2xl border p-4 shadow-sm">
-        {/* Overview */}
         {activeTab === "Overview" && (
           <OverviewPanel
             scenario={scenario}
@@ -814,7 +927,6 @@ export default function ScaleUpDashboard() {
           />
         )}
 
-        {/* Projects */}
         {activeTab === "Projects" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -840,76 +952,155 @@ export default function ScaleUpDashboard() {
                   {getProjects().map((row, rIdx) => (
                     <tr key={rIdx} className="border-t align-top">
                       <td className="px-2 py-2 min-w-[120px]">
-                        <TextCell value={row[0]} onChange={(v) => updateProjectCell(rIdx, 0, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[0] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 0, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[220px]">
-                        <TextCell value={row[1]} onChange={(v) => updateProjectCell(rIdx, 1, v)} />
+                      <td className="px-2 py-2 min-w-[240px]">
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[1] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 1, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[160px]">
-                        <TextCell value={row[2]} onChange={(v) => updateProjectCell(rIdx, 2, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[2] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 2, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <TextCell value={row[3]} onChange={(v) => updateProjectCell(rIdx, 3, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[3] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 3, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[160px]">
-                        <TextCell value={row[4]} onChange={(v) => updateProjectCell(rIdx, 4, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[4] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 4, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[150px]">
-                        <DateCell value={row[5]} onChange={(v) => updateProjectCell(rIdx, 5, v)} />
+                        <input
+                          type="date"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[5] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 5, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[150px]">
-                        <DateCell value={row[6]} onChange={(v) => updateProjectCell(rIdx, 6, v)} />
+                        <input
+                          type="date"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[6] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 6, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={row[7]} onChange={(v) => updateProjectCell(rIdx, 7, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[7] ?? 0}
+                          onChange={(e) => updateProjectCell(rIdx, 7, Number(e.target.value) || 0)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[260px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[260px]">
                         <AutoTextarea value={row[8] ?? ""} onChange={(v) => updateProjectCell(rIdx, 8, v)} />
                       </td>
-                      <td className="px-2 py-2 min-w-[260px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[260px]">
                         <AutoTextarea value={row[9] ?? ""} onChange={(v) => updateProjectCell(rIdx, 9, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[60px]">
-                        <TextCell value={row[10]} onChange={(v) => updateProjectCell(rIdx, 10, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[10] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 10, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[60px]">
-                        <TextCell value={row[11]} onChange={(v) => updateProjectCell(rIdx, 11, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[11] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 11, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[60px]">
-                        <TextCell value={row[12]} onChange={(v) => updateProjectCell(rIdx, 12, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[12] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 12, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[60px]">
-                        <TextCell value={row[13]} onChange={(v) => updateProjectCell(rIdx, 13, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[13] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 13, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[240px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[240px]">
                         <AutoTextarea value={row[14] ?? ""} onChange={(v) => updateProjectCell(rIdx, 14, v)} />
                       </td>
-                      <td className="px-2 py-2 min-w-[240px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[240px]">
                         <AutoTextarea value={row[15] ?? ""} onChange={(v) => updateProjectCell(rIdx, 15, v)} />
                       </td>
-                      <td className="px-2 py-2 min-w-[240px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[240px]">
                         <AutoTextarea value={row[16] ?? ""} onChange={(v) => updateProjectCell(rIdx, 16, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <NumCell value={row[17]} onChange={(v) => updateProjectCell(rIdx, 17, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[17] ?? 0}
+                          onChange={(e) => updateProjectCell(rIdx, 17, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <NumCell value={row[18]} onChange={(v) => updateProjectCell(rIdx, 18, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[18] ?? 0}
+                          onChange={(e) => updateProjectCell(rIdx, 18, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <NumCell value={row[19]} onChange={(v) => updateProjectCell(rIdx, 19, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[19] ?? 0}
+                          onChange={(e) => updateProjectCell(rIdx, 19, Number(e.target.value) || 0)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[240px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[240px]">
                         <AutoTextarea value={row[20] ?? ""} onChange={(v) => updateProjectCell(rIdx, 20, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[100px]">
-                        <TextCell value={row[21]} onChange={(v) => updateProjectCell(rIdx, 21, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[21] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 21, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <TextCell value={row[22]} onChange={(v) => updateProjectCell(rIdx, 22, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[22] ?? ""}
+                          onChange={(e) => updateProjectCell(rIdx, 22, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={row[23]} onChange={(v) => updateProjectCell(rIdx, 23, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[23] ?? 0}
+                          onChange={(e) => updateProjectCell(rIdx, 23, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[64px]">
                         <button
@@ -928,7 +1119,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* Manufacturing */}
         {activeTab === "Manufacturing" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -954,31 +1144,71 @@ export default function ScaleUpDashboard() {
                   {getProcesses().map((row, rIdx) => (
                     <tr key={rIdx} className="border-t">
                       <td className="px-2 py-2 min-w-[220px]">
-                        <TextCell value={row[0]} onChange={(v) => updateProcessCell(rIdx, 0, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[0] ?? ""}
+                          onChange={(e) => updateProcessCell(rIdx, 0, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={row[1]} onChange={(v) => updateProcessCell(rIdx, 1, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[1] ?? 0}
+                          onChange={(e) => updateProcessCell(rIdx, 1, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={row[2]} onChange={(v) => updateProcessCell(rIdx, 2, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[2] ?? 0}
+                          onChange={(e) => updateProcessCell(rIdx, 2, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={row[3]} onChange={(v) => updateProcessCell(rIdx, 3, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[3] ?? 0}
+                          onChange={(e) => updateProcessCell(rIdx, 3, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <NumCell value={row[4]} onChange={(v) => updateProcessCell(rIdx, 4, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[4] ?? 0}
+                          onChange={(e) => updateProcessCell(rIdx, 4, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[180px]">
-                        <TextCell value={row[5]} onChange={(v) => updateProcessCell(rIdx, 5, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[5] ?? ""}
+                          onChange={(e) => updateProcessCell(rIdx, 5, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[160px]">
-                        <TextCell value={row[6]} onChange={(v) => updateProcessCell(rIdx, 6, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[6] ?? ""}
+                          onChange={(e) => updateProcessCell(rIdx, 6, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[160px]">
-                        <TextCell value={row[7]} onChange={(v) => updateProcessCell(rIdx, 7, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[7] ?? ""}
+                          onChange={(e) => updateProcessCell(rIdx, 7, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[160px]">
-                        <TextCell value={row[8]} onChange={(v) => updateProcessCell(rIdx, 8, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[8] ?? ""}
+                          onChange={(e) => updateProcessCell(rIdx, 8, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[64px]">
                         <button
@@ -997,7 +1227,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* Resources */}
         {activeTab === "Resources" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -1021,21 +1250,43 @@ export default function ScaleUpDashboard() {
                   {getResources().map((row, rIdx) => (
                     <tr key={rIdx} className="border-t">
                       <td className="px-2 py-2 min-w-[220px]">
-                        <TextCell value={row[0]} onChange={(v) => updateResourceCell(rIdx, 0, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[0] ?? ""}
+                          onChange={(e) => updateResourceCell(rIdx, 0, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[150px]">
-                        <TextCell value={row[1]} onChange={(v) => updateResourceCell(rIdx, 1, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[1] ?? ""}
+                          onChange={(e) => updateResourceCell(rIdx, 1, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={row[2]} onChange={(v) => updateResourceCell(rIdx, 2, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[2] ?? 0}
+                          onChange={(e) => updateResourceCell(rIdx, 2, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <NumCell value={row[3]} onChange={(v) => updateResourceCell(rIdx, 3, v)} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[3] ?? 0}
+                          onChange={(e) => updateResourceCell(rIdx, 3, Number(e.target.value) || 0)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[180px]">
-                        <TextCell value={row[4]} onChange={(v) => updateResourceCell(rIdx, 4, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[4] ?? ""}
+                          onChange={(e) => updateResourceCell(rIdx, 4, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[240px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[240px]">
                         <AutoTextarea value={row[5] ?? ""} onChange={(v) => updateResourceCell(rIdx, 5, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[64px]">
@@ -1055,7 +1306,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* Risks */}
         {activeTab === "Risks" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -1079,28 +1329,53 @@ export default function ScaleUpDashboard() {
                   {getRisks().map((row, rIdx) => (
                     <tr key={rIdx} className="border-t">
                       <td className="px-2 py-2 min-w-[120px]">
-                        <TextCell value={row[0]} onChange={(v) => updateRiskCell(rIdx, 0, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[0] ?? ""}
+                          onChange={(e) => updateRiskCell(rIdx, 0, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[260px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[260px]">
                         <AutoTextarea value={row[1] ?? ""} onChange={(v) => updateRiskCell(rIdx, 1, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[100px]">
-                        <TextCell value={row[2]} onChange={(v) => updateRiskCell(rIdx, 2, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[2] ?? ""}
+                          onChange={(e) => updateRiskCell(rIdx, 2, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[100px]">
-                        <TextCell value={row[3]} onChange={(v) => updateRiskCell(rIdx, 3, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[3] ?? ""}
+                          onChange={(e) => updateRiskCell(rIdx, 3, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[260px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[260px]">
                         <AutoTextarea value={row[4] ?? ""} onChange={(v) => updateRiskCell(rIdx, 4, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[160px]">
-                        <TextCell value={row[5]} onChange={(v) => updateRiskCell(rIdx, 5, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[5] ?? ""}
+                          onChange={(e) => updateRiskCell(rIdx, 5, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[150px]">
-                        <DateCell value={row[6]} onChange={(v) => updateRiskCell(rIdx, 6, v)} />
+                        <input
+                          type="date"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[6] ?? ""}
+                          onChange={(e) => updateRiskCell(rIdx, 6, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <TextCell value={row[7]} onChange={(v) => updateRiskCell(rIdx, 7, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[7] ?? ""}
+                          onChange={(e) => updateRiskCell(rIdx, 7, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[64px]">
                         <button
@@ -1119,7 +1394,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* Meetings */}
         {activeTab === "Meetings" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -1161,40 +1435,69 @@ export default function ScaleUpDashboard() {
                   {getMeetings().map((row, rIdx) => (
                     <tr key={rIdx} className="border-t align-top">
                       <td className="px-2 py-2 min-w-[120px]">
-                        <TextCell value={row[0]} onChange={(v) => updateMeetingCell(rIdx, 0, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[0] ?? ""}
+                          onChange={(e) => updateMeetingCell(rIdx, 0, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[200px]">
-                        <TextCell value={row[1]} onChange={(v) => updateMeetingCell(rIdx, 1, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[1] ?? ""}
+                          onChange={(e) => updateMeetingCell(rIdx, 1, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <DateCell value={row[2]} onChange={(v) => updateMeetingCell(rIdx, 2, v)} />
+                        <input
+                          type="date"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[2] ?? ""}
+                          onChange={(e) => updateMeetingCell(rIdx, 2, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <TextCell value={row[3]} onChange={(v) => updateMeetingCell(rIdx, 3, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[3] ?? ""}
+                          onChange={(e) => updateMeetingCell(rIdx, 3, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <TextCell value={row[4]} onChange={(v) => updateMeetingCell(rIdx, 4, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[4] ?? ""}
+                          onChange={(e) => updateMeetingCell(rIdx, 4, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[220px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[220px]">
                         <AutoTextarea value={row[5] ?? row[10] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 5, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[200px]">
-                        <TextCell value={row[6]} onChange={(v) => updateMeetingCell(rIdx, 6, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[6] ?? ""}
+                          onChange={(e) => updateMeetingCell(rIdx, 6, e.target.value)}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[140px]">
-                        <TextCell value={row[7]} onChange={(v) => updateMeetingCell(rIdx, 7, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[7] ?? ""}
+                          onChange={(e) => updateMeetingCell(rIdx, 7, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[260px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[260px]">
                         <AutoTextarea value={row[8] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 8, v)} />
                       </td>
-                      <td className="px-2 py-2 min-w-[260px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[260px]">
                         <AutoTextarea value={row[9] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 9, v)} />
                       </td>
-                      <td className="px-2 py-2 min-w-[260px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[260px]">
                         <AutoTextarea value={row[10] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 10, v)} />
                       </td>
-                      <td className="px-2 py-2 min-w-[160px]">
-                        <div className="flex gap-2">
+                      <td className="px-2 py-2 min-w-[220px]">
+                        <div className="flex flex-wrap gap-2">
                           <Button variant="outline" size="sm" onClick={() => openEditMeetingModal(rIdx)} className="gap-1">
                             Edit
                           </Button>
@@ -1217,7 +1520,6 @@ export default function ScaleUpDashboard() {
               </table>
             </div>
 
-            {/* Meeting Modal */}
             {showMeetingModal && (
               <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
                 <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-xl">
@@ -1330,7 +1632,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* KPIs */}
         {activeTab === "KPIs" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -1354,19 +1655,41 @@ export default function ScaleUpDashboard() {
                   {getKpis().map((k) => (
                     <tr key={k.id} className="border-t">
                       <td className="px-2 py-2 min-w-[220px]">
-                        <TextCell value={k.name} onChange={(v) => updateKpi(k.id, { name: v })} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={k.name}
+                          onChange={(e) => updateKpi(k.id, { name: e.target.value })}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={k.current_value} onChange={(v) => updateKpi(k.id, { current_value: v })} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={k.current_value}
+                          onChange={(e) => updateKpi(k.id, { current_value: Number(e.target.value) || 0 })}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[120px]">
-                        <NumCell value={k.target_value} onChange={(v) => updateKpi(k.id, { target_value: v })} />
+                        <input
+                          type="number"
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={k.target_value}
+                          onChange={(e) => updateKpi(k.id, { target_value: Number(e.target.value) || 0 })}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[100px]">
-                        <TextCell value={k.unit} onChange={(v) => updateKpi(k.id, { unit: v })} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={k.unit}
+                          onChange={(e) => updateKpi(k.id, { unit: e.target.value })}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[180px]">
-                        <TextCell value={k.owner} onChange={(v) => updateKpi(k.id, { owner: v })} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={k.owner}
+                          onChange={(e) => updateKpi(k.id, { owner: e.target.value })}
+                        />
                       </td>
                       <td className="px-2 py-2 min-w-[64px]">
                         <button
@@ -1385,7 +1708,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* Financials */}
         {activeTab === "Financials" && (
           <div className="space-y-8">
             <div className="space-y-3">
@@ -1412,16 +1734,35 @@ export default function ScaleUpDashboard() {
                       return (
                         <tr key={rIdx} className="border-t">
                           <td className="px-2 py-2 min-w-[260px]">
-                            <TextCell value={row[0]} onChange={(v) => updateCapexCell(rIdx, 0, v)} />
+                            <input
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[0] ?? ""}
+                              onChange={(e) => updateCapexCell(rIdx, 0, e.target.value)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[120px]">
-                            <NumCell value={row[1]} onChange={(v) => updateCapexCell(rIdx, 1, v)} />
+                            <input
+                              type="number"
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[1] ?? 0}
+                              onChange={(e) => updateCapexCell(rIdx, 1, Number(e.target.value) || 0)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[140px]">
-                            <NumCell value={row[2]} onChange={(v) => updateCapexCell(rIdx, 2, v)} />
+                            <input
+                              type="number"
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[2] ?? 0}
+                              onChange={(e) => updateCapexCell(rIdx, 2, Number(e.target.value) || 0)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[140px]">
-                            <NumCell value={row[3]} onChange={(v) => updateCapexCell(rIdx, 3, v)} />
+                            <input
+                              type="number"
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[3] ?? 0}
+                              onChange={(e) => updateCapexCell(rIdx, 3, Number(e.target.value) || 0)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[160px]">{total.toLocaleString()}</td>
                           <td className="px-2 py-2 min-w-[64px]">
@@ -1465,16 +1806,34 @@ export default function ScaleUpDashboard() {
                       return (
                         <tr key={rIdx} className="border-t">
                           <td className="px-2 py-2 min-w-[260px]">
-                            <TextCell value={row[0]} onChange={(v) => updateOpexCell(rIdx, 0, v)} />
+                            <input
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[0] ?? ""}
+                              onChange={(e) => updateOpexCell(rIdx, 0, e.target.value)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[160px]">
-                            <TextCell value={row[1]} onChange={(v) => updateOpexCell(rIdx, 1, v)} />
+                            <input
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[1] ?? ""}
+                              onChange={(e) => updateOpexCell(rIdx, 1, e.target.value)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[120px]">
-                            <NumCell value={row[2]} onChange={(v) => updateOpexCell(rIdx, 2, v)} />
+                            <input
+                              type="number"
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[2] ?? 0}
+                              onChange={(e) => updateOpexCell(rIdx, 2, Number(e.target.value) || 0)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[140px]">
-                            <NumCell value={row[3]} onChange={(v) => updateOpexCell(rIdx, 3, v)} />
+                            <input
+                              type="number"
+                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                              value={row[3] ?? 0}
+                              onChange={(e) => updateOpexCell(rIdx, 3, Number(e.target.value) || 0)}
+                            />
                           </td>
                           <td className="px-2 py-2 min-w-[160px]">{total.toLocaleString()}</td>
                           <td className="px-2 py-2 min-w-[64px]">
@@ -1496,7 +1855,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* Glossary */}
         {activeTab === "Glossary" && (
           <div className="space-y-3">
             <div className="flex items-center justify-between">
@@ -1520,9 +1878,13 @@ export default function ScaleUpDashboard() {
                   {getGlossary().map((row, rIdx) => (
                     <tr key={rIdx} className="border-t">
                       <td className="px-2 py-2 min-w-[200px]">
-                        <TextCell value={row[0]} onChange={(v) => updateGlossaryCell(rIdx, 0, v)} />
+                        <input
+                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
+                          value={row[0] ?? ""}
+                          onChange={(e) => updateGlossaryCell(rIdx, 0, e.target.value)}
+                        />
                       </td>
-                      <td className="px-2 py-2 min-w-[400px] dashboard-wrap">
+                      <td className="px-2 py-2 min-w-[400px]">
                         <AutoTextarea value={row[1] ?? ""} onChange={(v) => updateGlossaryCell(rIdx, 1, v)} />
                       </td>
                       <td className="px-2 py-2 min-w-[64px]">
@@ -1542,7 +1904,6 @@ export default function ScaleUpDashboard() {
           </div>
         )}
 
-        {/* Config */}
         {activeTab === "Config" && (
           <div className="space-y-6">
             <div>
@@ -1550,14 +1911,16 @@ export default function ScaleUpDashboard() {
               <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="rounded-xl border p-3">
                   <p className="text-xs text-slate-500">Units / year ({scenario})</p>
-                  <NumCell
+                  <input
+                    type="number"
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
                     value={plan?.scenarios?.[scenario]?.unitsPerYear || 0}
-                    onChange={(v) =>
+                    onChange={(e) =>
                       setPlan((prev: any) => ({
                         ...prev,
                         scenarios: {
                           ...prev.scenarios,
-                          [scenario]: { ...prev.scenarios[scenario], unitsPerYear: v },
+                          [scenario]: { ...prev.scenarios[scenario], unitsPerYear: Number(e.target.value) || 0 },
                         },
                       }))
                     }
@@ -1565,14 +1928,16 @@ export default function ScaleUpDashboard() {
                 </div>
                 <div className="rounded-xl border p-3">
                   <p className="text-xs text-slate-500">Hours / day ({scenario})</p>
-                  <NumCell
+                  <input
+                    type="number"
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
                     value={plan?.scenarios?.[scenario]?.hoursPerDay || 8}
-                    onChange={(v) =>
+                    onChange={(e) =>
                       setPlan((prev: any) => ({
                         ...prev,
                         scenarios: {
                           ...prev.scenarios,
-                          [scenario]: { ...prev.scenarios[scenario], hoursPerDay: v },
+                          [scenario]: { ...prev.scenarios[scenario], hoursPerDay: Number(e.target.value) || 0 },
                         },
                       }))
                     }
@@ -1580,14 +1945,16 @@ export default function ScaleUpDashboard() {
                 </div>
                 <div className="rounded-xl border p-3">
                   <p className="text-xs text-slate-500">Shifts ({scenario})</p>
-                  <NumCell
+                  <input
+                    type="number"
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
                     value={plan?.scenarios?.[scenario]?.shifts || 1}
-                    onChange={(v) =>
+                    onChange={(e) =>
                       setPlan((prev: any) => ({
                         ...prev,
                         scenarios: {
                           ...prev.scenarios,
-                          [scenario]: { ...prev.scenarios[scenario], shifts: v },
+                          [scenario]: { ...prev.scenarios[scenario], shifts: Number(e.target.value) || 0 },
                         },
                       }))
                     }
@@ -1595,9 +1962,11 @@ export default function ScaleUpDashboard() {
                 </div>
                 <div className="rounded-xl border p-3">
                   <p className="text-xs text-slate-500">Buffer (%)</p>
-                  <NumCell
+                  <input
+                    type="number"
+                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
                     value={Math.round((plan?.bufferPct || 0) * 100)}
-                    onChange={(v) => setPlan((prev: any) => ({ ...prev, bufferPct: Math.max(0, v) / 100 }))}
+                    onChange={(e) => setPlan((prev: any) => ({ ...prev, bufferPct: Math.max(0, Number(e.target.value) || 0) / 100 }))}
                   />
                 </div>
               </div>
