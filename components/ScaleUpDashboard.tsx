@@ -1,1662 +1,1355 @@
-"use client"
+"use client";
 
-import React, { useEffect, useMemo, useState } from "react"
-import { Button } from "@/components/ui/button"
-import { Loader2, Plus, Calendar as CalendarIcon, FileText, Save, X, TrendingUp } from "lucide-react"
-import { jsPDF } from "jspdf"
-import { generateWeeklySummary } from "@/lib/utils"
-import { clone, SEED_PLAN } from "@/lib/constants"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Loader2, Plus, Trash2, Save, FileText, TrendingUp } from "lucide-react";
+import { generateWeeklySummary } from "@/lib/utils";
+import { clone, SEED_PLAN } from "@/lib/constants";
+import jsPDF from "jspdf";
 
-interface Scenario {
-  id: string
-  name: string
-  description?: string
-  target_units?: number
-  created_at?: string
-  updated_at?: string
-}
+/** ----------------------------- Types ----------------------------- */
+type Variant = "Recess Nanodispensing" | "Dipcoating";
+type ScenarioKey = "50k" | "200k";
 
 interface KPI {
-  id: string
-  scenario_id: string
-  name: string
-  target_value: number
-  current_value: number
-  unit: string
-  owner: string
-  created_at: string
-  updated_at: string
+  id: string;
+  name: string;
+  current_value: number;
+  target_value: number;
+  unit: string;
+  owner: string;
+  scenario_id?: string;
+  created_at?: string;
+  updated_at?: string;
 }
-
-interface CostData {
-  id: string
-  scenario_id: string
-  capex: number
-  opex: number
-  cost_per_unit: number
-  created_at?: string
-  updated_at?: string
-}
-
-type Variant = "Recess Nanodispensing" | "Dipcoating"
 
 interface SyncStatus {
-  isOnline: boolean
-  lastSync: Date
-  pendingChanges: number
-  connectedUsers: number
+  isOnline: boolean;
+  lastSync: Date;
+  pendingChanges: number;
+  connectedUsers: number;
 }
 
-function SyncStatusIndicator({ syncStatus }: { syncStatus: SyncStatus }) {
-  return (
-    <div className="flex items-center gap-2 text-sm">
-      <div className={`w-2 h-2 rounded-full ${syncStatus.isOnline ? "bg-green-500" : "bg-red-500"}`} />
-      <span className="text-slate-600">
-        {syncStatus.isOnline ? "Online" : "Offline"} • {syncStatus.connectedUsers} users •{" "}
-        {syncStatus.pendingChanges > 0 ? `${syncStatus.pendingChanges} pending` : "no pending"}
-      </span>
-      <span className="text-xs text-slate-500">Last sync: {syncStatus.lastSync.toLocaleTimeString()}</span>
-    </div>
-  )
-}
+/** --------------------------- Utilities --------------------------- */
+const ensureArray = (val: any): any[] => (Array.isArray(val) ? val : Array.isArray(val?.data) ? val.data : []);
+const currency = (n: any) => {
+  const num = Number(n || 0);
+  return isFinite(num) ? `$${num.toLocaleString()}` : "$0";
+};
 
-const DATE_TZ = "T00:00:00"
-
-function parseMinutesFromDuration(d: string): number {
-  if (!d) return 60
-  const m = d.toLowerCase().trim()
-  const mm = m.match(/(\d+)\s*m(in)?/)
-  const hh = m.match(/(\d+)\s*h(our|rs)?/)
-  if (mm) return parseInt(mm[1], 10)
-  if (hh) return parseInt(hh[1], 10) * 60
-  const num = parseInt(m.replace(/\D/g, ""), 10)
-  return Number.isFinite(num) && num > 0 ? num : 60
-}
-
-function combineDateTime(date: string, time: string): Date {
-  if (!date) return new Date()
-  if (!time) return new Date(date + DATE_TZ)
-  // Accept "HH:mm" or "HH:mm:ss"
-  const parts = time.split(":")
-  const d = new Date(date + DATE_TZ)
-  if (parts.length >= 2) {
-    d.setHours(parseInt(parts[0] || "0", 10))
-    d.setMinutes(parseInt(parts[1] || "0", 10))
-    d.setSeconds(parts.length >= 3 ? parseInt(parts[2] || "0", 10) : 0)
-  }
-  return d
-}
-
-function fmtICS(dt: Date) {
-  // YYYYMMDDTHHMMSSZ (use local time without TZ for simplicity)
-  const pad = (n: number) => String(n).padStart(2, "0")
-  const y = dt.getFullYear()
-  const mo = pad(dt.getMonth() + 1)
-  const da = pad(dt.getDate())
-  const h = pad(dt.getHours())
-  const mi = pad(dt.getMinutes())
-  const s = pad(dt.getSeconds())
-  return `${y}${mo}${da}T${h}${mi}${s}`
-}
-
-function ensureArray(v: any): any[] {
-  if (Array.isArray(v)) return v
-  if (v && typeof v === "object" && Array.isArray((v as any).rows)) return (v as any).rows
-  if (v == null) return []
-  return [v]
-}
-
-const ScaleUpDashboard: React.FC = () => {
-  // Core app state
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+/** --------------------------- Component --------------------------- */
+export default function ScaleUpDashboard() {
+  /** ------------------ Core state & derived values ------------------ */
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<
-    "overview" | "projects" | "manufacturing" | "resources" | "risks" | "meetings" | "kpis" | "financials" | "glossary" | "config"
-  >("projects")
+    "Overview" | "Projects" | "Manufacturing" | "Resources" | "Risks" | "Meetings" | "KPIs" | "Financials" | "Glossary" | "Config"
+  >("Overview");
 
-  const [scenario, setScenario] = useState<"50k" | "200k">("50k")
-  const [variant, setVariant] = useState<Variant>("Recess Nanodispensing")
+  const [scenario, setScenario] = useState<ScenarioKey>("50k");
+  const [variant, setVariant] = useState<Variant>("Recess Nanodispensing");
 
-  const [plan, setPlan] = useState(() => {
-    const initial = clone(SEED_PLAN)
-    if (!initial.scenarios) {
-      initial.scenarios = {
+  // master plan structure similar to previous versions
+  const [plan, setPlan] = useState<any>(() => {
+    const p = clone(SEED_PLAN);
+    if (!p.scenarios) {
+      p.scenarios = {
         "50k": { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 },
         "200k": { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 },
-      }
+      };
     }
-    return initial
-  })
+    if (!p.products) {
+      p.products = {
+        "50k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], capex50k: [], opex50k: [], capex200k: [], opex200k: [], processes: [], kpis: [], costData: [] },
+        "200k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], capex50k: [], opex50k: [], capex200k: [], opex200k: [], processes: [], kpis: [], costData: [] },
+      };
+    }
+    return p;
+  });
 
-  const [currentScenario, setCurrentScenario] = useState<Scenario | null>(null)
-  const [_scenarios, _setScenarios] = useState<Scenario[]>([])
-  const [costData, setCostData] = useState<CostData[]>([])
-
-  const [kpis, setKpis] = useState<KPI[]>([
-    {
-      id: "kpi-1",
-      scenario_id: "default",
-      name: "Production Efficiency",
-      target_value: 95,
-      current_value: 87,
-      unit: "%",
-      owner: "Production Manager",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    {
-      id: "kpi-2",
-      scenario_id: "default",
-      name: "Quality Score",
-      target_value: 98,
-      current_value: 94,
-      unit: "%",
-      owner: "Quality Engineer",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    {
-      id: "kpi-3",
-      scenario_id: "default",
-      name: "Cost Reduction",
-      target_value: 15,
-      current_value: 12,
-      unit: "%",
-      owner: "Operations Lead",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    {
-      id: "kpi-4",
-      scenario_id: "default",
-      name: "Time to Market",
-      target_value: 180,
-      current_value: 195,
-      unit: "days",
-      owner: "Project Manager",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-  ])
-
-  const [analysis, setAnalysis] = useState<{ summary: string; tldr: string }>({ summary: "", tldr: "" })
+  // per-tab flat states (easier editing)
+  const [projects, setProjects] = useState<any[][]>([]);
+  const [manufacturing, setManufacturing] = useState<any[][]>([]);
+  const [resources, setResources] = useState<any[][]>([]);
+  const [risks, setRisks] = useState<any[][]>([]);
+  const [meetings, setMeetings] = useState<any[][]>([]);
+  const [kpis, setKpis] = useState<KPI[]>([]);
+  const [financials, setFinancials] = useState<any[][]>([]); // [["Category","Item",Amount,"Type","Notes"]]
+  const [glossary, setGlossary] = useState<any[][]>([]);
 
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     isOnline: true,
     lastSync: new Date(),
     pendingChanges: 0,
     connectedUsers: 1,
-  })
+  });
 
-  // ---------- Table data ----------
-  const [manufacturingProcesses, setManufacturingProcesses] = useState<any[][]>([
-    ["Receive Needles", 0, 1, 100, 0, "Manual Station", "Manual", "Validated", "Operator1"],
-    ["Mount Needles to VS & Run Inspection", 2, 1, 98, 120, "Vision System", "Semi-Auto", "Validated", "Operator1"],
-    ["Unmount", 0.1, 1, 100, 6, "Manual Station", "Manual", "Validated", "Operator1"],
-    ["Sort into Vials", 0.25, 90, 100, 15, "Manual Station", "Manual", "Validated", "Operator1"],
-    ["Solvent Clean 1", 0.1, 90, 99, 6, "Cleaning Station", "Manual", "Validated", "Operator2"],
-    ["Rinse 1", 0.1, 90, 100, 6, "Cleaning Station", "Manual", "Validated", "Operator2"],
-    ["Solvent Clean 2", 0.1, 90, 99, 6, "Cleaning Station", "Manual", "Validated", "Operator2"],
-    ["Rinse 2", 0.1, 90, 100, 6, "Cleaning Station", "Manual", "Validated", "Operator2"],
-    ["Solvent Clean 3", 0.1, 90, 99, 6, "Cleaning Station", "Manual", "Validated", "Operator2"],
-    ["Rinse 3", 0.1, 90, 100, 6, "Cleaning Station", "Manual", "Validated", "Operator2"],
-    ["Dry", 0.1, 90, 100, 6, "Drying Station", "Manual", "Validated", "Operator2"],
-    ["IHCL", 5, 90, 95, 300, "IHCL System", "Auto", "Validated", "Operator3"],
-    ["Plasma", 10, 90, 98, 600, "Plasma System", "Auto", "Validated", "Operator3"],
-    ["Monolayer", 15, 90, 97, 900, "Coating System", "Auto", "Validated", "Operator4"],
-    ["OCP", 8, 90, 99, 480, "OCP System", "Auto", "Validated", "Operator4"],
-    ["Enzyme Dipcoating", 20, 90, 96, 1200, "Dipcoating System", "Auto", "Validated", "Operator5"],
-    ["Tubing QC", 1, 1, 100, 60, "QC Station", "Manual", "Validated", "QC1"],
-    ["Outer Membrane Dipcoating", 25, 90, 95, 1500, "Dipcoating System", "Auto", "Validated", "Operator5"],
-    ["Cable QC", 0.5, 1, 100, 30, "QC Station", "Manual", "Validated", "QC1"],
-    ["Assembly", 3, 1, 99, 180, "Assembly Station", "Manual", "Validated", "Operator6"],
-    ["Precal QC", 2, 1, 98, 120, "QC Station", "Manual", "Validated", "Operator2"],
-    ["Final QC", 1.5, 1, 99, 90, "QC Station", "Manual", "Validated", "Operator2"],
-    ["Packaging", 0.5, 1, 100, 30, "Packaging Station", "Manual", "Validated", "Operator7"],
-  ])
-
-  const [resourcesData, setResourcesData] = useState<any[][]>([
-    ["Production Manager", "Personnel", 1, 95000, "Manufacturing", "Full-time position"],
-    ["Quality Engineer", "Personnel", 2, 75000, "Quality", "QC oversight"],
-    ["Manufacturing Equipment", "Equipment", 5, 150000, "Production", "Core production line"],
-    ["Testing Equipment", "Equipment", 3, 85000, "Quality", "QC testing systems"],
-  ])
-
-  const [risksData, setRisksData] = useState<any[][]>([
-    ["Supply Chain Disruption", "H", "M", "Diversify suppliers", "Operations", "Monitoring"],
-    ["Regulatory Changes", "M", "L", "Stay updated on regulations", "Compliance", "Active"],
-    ["Equipment Failure", "H", "L", "Preventive maintenance", "Engineering", "Mitigated"],
-    ["Quality Issues", "H", "M", "Enhanced QC processes", "Quality", "Active"],
-  ])
-
-  const [financialData, setFinancialData] = useState<any[][]>([
-    ["Revenue", "Product Sales", 2250000, "Income", "Projected annual revenue"],
-    ["COGS", "Manufacturing Costs", 1350000, "Expense", "Direct production costs"],
-    ["OpEx", "Operating Expenses", 450000, "Expense", "Ongoing operational costs"],
-    ["CapEx", "Equipment Investment", 750000, "Investment", "Initial capital expenditure"],
-  ])
-
-  const [glossaryTerms, setGlossaryTerms] = useState<any[][]>([
-    ["IHCL", "Ion-Implanted Hydrophilic Coating Layer - Surface treatment process"],
-    ["OCP", "Open Circuit Potential - Electrochemical measurement technique"],
-    ["Plasma", "Plasma surface treatment for enhanced adhesion"],
-    ["Monolayer", "Single molecular layer coating application"],
-    ["Dipcoating", "Controlled immersion coating process"],
-  ])
-
-  // ---------- Variant data normalization ----------
-  const currentVariantData = useMemo(() => {
-    const base =
-      (plan.products && plan.products[scenario]) || {
-        projects: [],
-        equipment: [],
-        capex50k: [],
-        capex200k: [],
-        opex50k: [],
-        opex200k: [],
-        resources: [],
-        hiring: [],
-        risks: [],
-        actions: [],
-        processes: [],
-        manufacturing: [],
-        meetings: [],
-        launch: {
-          fiftyK: new Date().toISOString(),
-          twoHundredK: new Date().toISOString(),
-        },
-      }
-    return {
-      ...base,
-      projects: ensureArray(base.projects),
-      manufacturing: ensureArray(base.manufacturing),
-      resources: ensureArray(base.resources),
-      risks: ensureArray(base.risks),
-      meetings: ensureArray(base.meetings),
-    }
-  }, [plan, scenario])
-
-  // ---------- Projects table (wide column widths so text doesn't overlay) ----------
-  const projectsHeaders = [
-    "id",
-    "name",
-    "type",
-    "moscow",
-    "owner",
-    "start",
-    "finish",
-    "dependencies",
-    "deliverables",
-    "goal",
-    "R",
-    "A",
-    "C",
-    "I",
-    "needs",
-    "barriers",
-    "risks",
-    "budget_capex",
-    "budget_opex",
-    "percent_complete",
-    "process_link",
-    "critical",
-    "status",
-    "slack_days",
-  ]
-
-  const projectsWidths = [
-    140,
-    320,
-    160,
-    140,
-    170,
-    150,
-    150,
-    140,
-    440,
-    440,
-    80,
-    80,
-    80,
-    80,
-    400,
-    400,
-    400,
-    160,
-    160,
-    160,
-    200,
-    120,
-    150,
-    130,
-  ]
-  const projectsTableMinW = useMemo(() => projectsWidths.reduce((a, b) => a + b, 0) + 60, [projectsWidths])
-
-  const projectRows = useMemo(() => {
-    const rows = ensureArray(currentVariantData.projects).map((p: any, idx: number) => {
-      if (Array.isArray(p)) return p
-      if (!p || typeof p !== "object") {
-        return [
-          `PROJ-${Date.now()}-${idx}`,
-          "New Project",
-          "Development",
-          "Must",
-          "Project Manager",
-          "",
-          "",
-          0,
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          "",
-          0,
-          0,
-          0,
-          "",
-          "false",
-          "GREEN",
-          0,
-        ]
-      }
-      return [
-        p.id || `PROJ-${Date.now()}-${idx}`,
-        p.name || "",
-        p.type || p.phase || "Planning",
-        p.moscow || p.priority || "Medium",
-        p.owner || p.assignee || "",
-        p.start || p.startDate || "",
-        p.finish || p.endDate || "",
-        p.dependencies || 0,
-        p.deliverables || "",
-        p.goal || p.objectives || p.description || "",
-        p.raciR || "",
-        p.raciA || "",
-        p.raciC || "",
-        p.raciI || "",
-        p.needs || "",
-        p.barriers || "",
-        p.risks || "",
-        p.budget_capex ?? p.budget ?? 0,
-        p.budget_opex ?? 0,
-        p.percent_complete ?? p.progress ?? 0,
-        p.process_link || "",
-        String(p.critical ?? false),
-        p.status || "Planning",
-        p.slack_days ?? 0,
-      ]
-    })
-    return rows
-  }, [currentVariantData.projects])
-
-  const handleProjectCellChange = (rowIndex: number, colIndex: number, value: any) => {
-    const updated = projectRows.map((r) => [...r])
-    if (updated[rowIndex]) updated[rowIndex][colIndex] = value
-    setPlan((prev) => ({
-      ...prev,
-      products: {
-        ...prev.products,
-        [scenario]: {
-          ...prev.products?.[scenario],
-          projects: updated,
-        },
-      },
-    }))
-    setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
-  }
-
-  // ---------- Meetings manager (schedule window + agenda/notes + export) ----------
-  type Meeting = {
-    title: string
-    date: string
-    time: string
-    duration: string
-    attendees: string
-    location: string
-    status: string
-    agenda: string
-    notes: string
-  }
-
-  const meetingsList: Meeting[] = useMemo(() => {
-    const rows = ensureArray(currentVariantData.meetings)
-    return rows.map((m: any, idx: number) => {
-      if (Array.isArray(m)) {
-        const copy = [...m]
-        while (copy.length < 9) copy.push("")
-        return {
-          title: String(copy[0] ?? `Meeting ${idx + 1}`),
-          date: String(copy[1] ?? new Date().toISOString().slice(0, 10)),
-          time: String(copy[2] ?? "10:00"),
-          duration: String(copy[3] ?? "60 min"),
-          attendees: String(copy[4] ?? "Team"),
-          location: String(copy[5] ?? "Location"),
-          status: String(copy[6] ?? "Scheduled"),
-          agenda: String(copy[7] ?? ""),
-          notes: String(copy[8] ?? ""),
-        }
-      }
-      return {
-        title: m?.title || `Meeting ${idx + 1}`,
-        date: m?.date || new Date().toISOString().slice(0, 10),
-        time: m?.time || "10:00",
-        duration: m?.duration || "60 min",
-        attendees: m?.attendees || "Team",
-        location: m?.location || "Location",
-        status: m?.status || "Scheduled",
-        agenda: m?.agenda || "",
-        notes: m?.notes || "",
-      }
-    })
-  }, [currentVariantData.meetings])
-
-  const [selectedMeetingIdx, setSelectedMeetingIdx] = useState<number>(-1)
-
+  /** ---------------------- Load from Supabase ---------------------- */
   useEffect(() => {
-    if (meetingsList.length > 0 && (selectedMeetingIdx < 0 || selectedMeetingIdx >= meetingsList.length)) {
-      setSelectedMeetingIdx(0)
-    }
-  }, [meetingsList.length, selectedMeetingIdx])
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch("/api/configurations", { signal: controller.signal });
+        clearTimeout(timeoutId);
 
-  const writeMeetingsBack = (list: Meeting[]) => {
-    const rows = list.map((m) => [
-      m.title,
-      m.date,
-      m.time,
-      m.duration,
-      m.attendees,
-      m.location,
-      m.status,
-      m.agenda,
-      m.notes,
-    ])
-    setPlan((prev) => ({
-      ...prev,
-      products: {
-        ...prev.products,
-        [scenario]: {
-          ...prev.products?.[scenario],
-          meetings: rows,
-        },
-      },
-    }))
-    setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
-  }
-
-  const updateMeetingField = (idx: number, field: keyof Meeting, value: string) => {
-    const copy = meetingsList.map((m) => ({ ...m }))
-    copy[idx][field] = value
-    writeMeetingsBack(copy)
-  }
-
-  const addMeeting = () => {
-    const copy = meetingsList.map((m) => ({ ...m }))
-    copy.push({
-      title: "New Project Meeting",
-      date: new Date().toISOString().slice(0, 10),
-      time: "10:00",
-      duration: "60 min",
-      attendees: "Project Team, Stakeholders",
-      location: "Conference Room A / Zoom",
-      status: "Scheduled",
-      agenda: "1) Objectives\n2) Status updates\n3) Risks & blockers\n4) Decisions & actions",
-      notes: "",
-    })
-    writeMeetingsBack(copy)
-    setSelectedMeetingIdx(copy.length - 1)
-  }
-
-  const deleteMeeting = (idx: number) => {
-    const copy = meetingsList.filter((_, i) => i !== idx)
-    writeMeetingsBack(copy)
-    setSelectedMeetingIdx(copy.length ? Math.max(0, idx - 1) : -1)
-  }
-
-  const exportSelectedMeetingPDF = () => {
-    if (selectedMeetingIdx < 0 || selectedMeetingIdx >= meetingsList.length) return
-    const m = meetingsList[selectedMeetingIdx]
-    const doc = new jsPDF({ unit: "pt", format: "a4" })
-    const W = 595
-    const M = 40
-    let y = M
-
-    const addLines = (text: string, indent = 0, size = 11, gap = 14) => {
-      doc.setFont("helvetica", "normal")
-      doc.setFontSize(size)
-      const maxW = W - 2 * M - indent
-      const lines = doc.splitTextToSize(text, maxW)
-      lines.forEach((ln) => {
-        if (y + gap > 842 - M) {
-          doc.addPage()
-          y = M
+        if (!res.ok) {
+          if (res.status === 401) {
+            setError("Please sign in to load and save your dashboard data.");
+          } else {
+            setError(`Failed to load data: ${res.statusText}`);
+          }
+          setLoading(false);
+          return;
         }
-        doc.text(ln, M + indent, y)
-        y += gap
-      })
+
+        const rows = await res.json();
+        const latest = Array.isArray(rows)
+          ? rows.find((r: any) => r.name === "ScaleUp-Dashboard-Config") ?? rows[0]
+          : null;
+
+        if (latest?.data) {
+          const data = latest.data;
+          setPlan(data.plan ?? plan);
+          setScenario(data.scenario ?? scenario);
+          setVariant(data.variant ?? variant);
+
+          const prod = data.plan?.products?.[data.scenario ?? scenario] ?? {};
+          setProjects(ensureArray(prod.projects));
+          setManufacturing(ensureArray(prod.manufacturing));
+          setResources(ensureArray(prod.resources));
+          setRisks(ensureArray(prod.risks));
+          setMeetings(ensureArray(prod.meetings));
+          setFinancials(
+            ensureArray(data.financials?.[data.scenario ?? scenario])?.length
+              ? ensureArray(data.financials?.[data.scenario ?? scenario])
+              : ensureArray(data.financials) // fallback older shape
+          );
+          setGlossary(ensureArray(data.glossary));
+          setKpis(Array.isArray(data.kpis) ? data.kpis : ensureArray(prod.kpis));
+        } else {
+          // keep defaults
+        }
+      } catch (e: any) {
+        setError(e?.message ?? "Failed to load data.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** ---------------------------- Autosave ---------------------------- */
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleSave = useCallback(() => {
+    setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }));
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      await saveAll();
+    }, 1500);
+  }, []);
+
+  const saveAll = useCallback(async () => {
+    try {
+      setSaving(true);
+      // fold tab states back into plan
+      setPlan((prev: any) => {
+        const next = { ...prev, products: { ...prev.products } };
+        next.products[scenario] = {
+          ...(next.products[scenario] || {}),
+          projects,
+          manufacturing,
+          resources,
+          risks,
+          meetings,
+          kpis,
+        };
+        // pack financials and glossary at top level of payload to keep compatibility
+        const payload = {
+          plan: next,
+          scenario,
+          variant,
+          financials: { [scenario]: financials },
+          glossary,
+          lastSaved: new Date().toISOString(),
+        };
+        // fire-and-forget actual POST
+        (async () => {
+          const res = await fetch("/api/configurations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: "ScaleUp-Dashboard-Config",
+              description: "ScaleUp Dashboard Configuration",
+              data: payload,
+              modified_by: "dashboard",
+              upsert: true,
+            }),
+          });
+          if (!res.ok) {
+            const j = await res.json().catch(() => ({}));
+            console.error("Save failed:", res.status, j?.error);
+            setError(j?.error ?? `Save failed with ${res.status}`);
+            setSyncStatus((s) => ({ ...s, isOnline: false }));
+          } else {
+            setError(null);
+            setSyncStatus((s) => ({ ...s, isOnline: true, pendingChanges: 0, lastSync: new Date() }));
+          }
+          setSaving(false);
+        })();
+        return next;
+      });
+    } catch (e: any) {
+      console.error(e);
+      setSaving(false);
+      setSyncStatus((s) => ({ ...s, isOnline: false }));
+      setError(e?.message ?? "Failed to save.");
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, manufacturing, resources, risks, meetings, kpis, financials, glossary, scenario, variant]);
 
-    doc.setFont("helvetica", "bold")
-    doc.setFontSize(16)
-    doc.text("Meeting Summary", M, y)
-    y += 22
+  // schedule save when any tab state changes
+  useEffect(() => {
+    if (!loading) scheduleSave();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projects, manufacturing, resources, risks, meetings, kpis, financials, glossary, scenario, variant, loading]);
 
-    addLines(`Title: ${m.title}`)
-    addLines(`When: ${m.date} ${m.time}  •  Duration: ${m.duration}`)
-    addLines(`Where: ${m.location}`)
-    addLines(`Attendees: ${m.attendees}`)
-    addLines(`Status: ${m.status}`)
-    y += 6
-    doc.setDrawColor(200, 200, 200)
-    doc.line(M, y, W - M, y)
-    y += 16
+  /** --------------------- Derived overview metrics --------------------- */
+  const scenarioCfg =
+    plan?.scenarios?.[scenario] ?? (scenario === "50k" ? { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 } : { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 });
 
-    doc.setFont("helvetica", "bold")
-    doc.setFontSize(13)
-    doc.text("Agenda", M, y)
-    y += 16
-    addLines(m.agenda || "—", 0, 11, 14)
-
-    y += 6
-    doc.setDrawColor(200, 200, 200)
-    doc.line(M, y, W - M, y)
-    y += 16
-
-    doc.setFont("helvetica", "bold")
-    doc.setFontSize(13)
-    doc.text("Notes", M, y)
-    y += 16
-    addLines(m.notes || "—", 0, 11, 14)
-
-    doc.save(`Meeting_${m.title.replace(/\s+/g, "_")}_${m.date}.pdf`)
-  }
-
-  const exportSelectedMeetingICS = () => {
-    if (selectedMeetingIdx < 0 || selectedMeetingIdx >= meetingsList.length) return
-    const m = meetingsList[selectedMeetingIdx]
-    const start = combineDateTime(m.date, m.time)
-    const mins = parseMinutesFromDuration(m.duration)
-    const end = new Date(start.getTime() + mins * 60000)
-
-    const ics = [
-      "BEGIN:VCALENDAR",
-      "VERSION:2.0",
-      "PRODID:-//VitalTrace//ScaleUp Dashboard//EN",
-      "CALSCALE:GREGORIAN",
-      "METHOD:PUBLISH",
-      "BEGIN:VEVENT",
-      `UID:${crypto.randomUUID()}@vitaltrace`,
-      `DTSTAMP:${fmtICS(new Date())}`,
-      `DTSTART:${fmtICS(start)}`,
-      `DTEND:${fmtICS(end)}`,
-      `SUMMARY:${m.title}`,
-      `DESCRIPTION:${(m.agenda || "").replace(/\n/g, "\\n")}${m.notes ? "\\n\\nNotes: " + m.notes.replace(/\n/g, "\\n") : ""}`,
-      `LOCATION:${m.location}`,
-      "END:VEVENT",
-      "END:VCALENDAR",
-    ].join("\r\n")
-
-    const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `Meeting_${m.title.replace(/\s+/g, "_")}_${m.date}.ics`
-    a.click()
-    URL.revokeObjectURL(url)
-  }
-
-  // ---------- Overview metrics ----------
-  const overviewMetrics = useMemo(() => {
-    const scenarioData =
-      plan.scenarios && plan.scenarios[scenario]
-        ? plan.scenarios[scenario]
-        : { unitsPerYear: scenario === "50k" ? 50000 : 200000 }
-
-    const projectsCount = projectRows.length
-    const completedProjects = Math.floor(projectsCount * 0.2)
-    const activeProjects = Math.floor(projectsCount * 0.7)
-    const highRisks = Math.floor(risksData.length * 0.3)
-
-    const currentCostData = costData.find((c) => c.scenario_id === currentScenario?.id)
+  const overview = useMemo(() => {
+    const totalProjects = projects.length;
+    const active = Math.floor(totalProjects * 0.7);
+    const completed = Math.floor(totalProjects * 0.2);
+    const atRisk = totalProjects - active - completed;
+    const totalResources = resources.reduce((acc, r) => acc + Number(r?.[2] || 0), 0);
+    const kpiHealth =
+      kpis.length > 0
+        ? Math.round((kpis.filter((k) => k.current_value >= k.target_value * 0.9).length / kpis.length) * 100)
+        : 85;
 
     return {
-      targetProduction: scenarioData.unitsPerYear,
-      capacityUtilization: ((scenarioData.unitsPerYear / (scenario === "50k" ? 60000 : 250000)) * 100).toFixed(0),
-      annualRevenue: currentCostData ? scenarioData.unitsPerYear * 45 : 2250000,
-      profitMargin: currentCostData
-        ? (
-            ((scenarioData.unitsPerYear * 45 - currentCostData.capex - currentCostData.opex) /
-              (scenarioData.unitsPerYear * 45)) *
-            100
-          ).toFixed(1)
-        : "28.7",
-      costPerUnit: currentCostData ? currentCostData.cost_per_unit : 32.06,
-      totalProjects: projectsCount,
-      completedProjects,
-      activeProjects,
-      highPriorityRisks: highRisks,
-    }
-  }, [plan, scenario, projectRows.length, risksData.length, costData, currentScenario])
+      totalProjects,
+      active,
+      completed,
+      atRisk,
+      totalResources,
+      kpiHealth,
+      capacityUtil: Math.round(
+        (scenarioCfg.unitsPerYear / (scenario === "50k" ? 60000 : 250000)) * 100
+      ),
+    };
+  }, [projects, resources, kpis, scenario, scenarioCfg]);
 
-  // ---------- Supabase Persistence ----------
-  const saveProjectDataToDatabase = async () => {
-    try {
-      setSaving(true)
-      setError(null)
-      const projectData = { plan, scenario, variant, currentVariantData, lastSaved: new Date().toISOString() }
-      const res = await fetch("/api/configurations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: "ScaleUp-Dashboard-Config",
-          description: "ScaleUp Dashboard Configuration",
-          data: projectData,
-          modified_by: "user",
-          upsert: true,
-        }),
-      })
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}))
-        throw new Error(j?.error || `Save failed with status ${res.status}`)
-      }
-      setSyncStatus((s) => ({ ...s, pendingChanges: 0, lastSync: new Date(), isOnline: true }))
-    } catch (e: any) {
-      setError(e?.message || "Failed to save data.")
-      setSyncStatus((s) => ({ ...s, isOnline: false }))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const loadProjectDataFromDatabase = async () => {
-    try {
-      setLoading(true)
-      setError(null)
-      const res = await fetch("/api/configurations")
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}))
-        throw new Error(j?.error || `Load failed with status ${res.status}`)
-      }
-      const configs = await res.json()
-      let latest =
-        Array.isArray(configs)
-          ? configs.find((c: any) => c.name === "ScaleUp-Dashboard-Config") ||
-            configs.sort((a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0]
-          : null
-
-      if (latest && latest.data) {
-        const { plan: loadedPlan, scenario: loadedScenario, variant: loadedVariant } = latest.data
-        if (loadedPlan && Object.keys(loadedPlan).length > 0) setPlan(loadedPlan)
-        if (loadedScenario) setScenario(loadedScenario)
-        if (loadedVariant) setVariant(loadedVariant)
-      }
-    } catch (e: any) {
-      setError(e?.message || "Failed to load data.")
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    loadProjectDataFromDatabase().finally(() => setLoading(false))
-  }, [])
-
-  // ---------- Weekly TXT + Comprehensive PDF ----------
+  /** ----------------------- Weekly TXT export ----------------------- */
   const exportWeeklySummary = () => {
-    const summary = generateWeeklySummary()
-    const reportContent = `
-WEEKLY PROJECT SUMMARY - ${summary.week}
+    const sum = generateWeeklySummary?.() ?? {
+      week: new Date().toISOString().slice(0, 10),
+      projectsCompleted: 0,
+      projectsOnTrack: 0,
+      projectsAtRisk: 0,
+      keyMilestones: [],
+      criticalIssues: [],
+      nextWeekPriorities: [],
+      kpiSummary: [],
+    };
+
+    const content = `
+WEEKLY PROJECT SUMMARY - ${sum.week}
 VitalTrace Manufacturing Scale-Up Dashboard
 Scenario: ${scenario} | Variant: ${variant}
 
 ═══════════════════════════════════════════════════════════════
 
 📊 PROJECT STATUS OVERVIEW
-• Projects Completed: ${summary.projectsCompleted}
-• Projects On Track: ${summary.projectsOnTrack}
-• Projects At Risk: ${summary.projectsAtRisk}
-• Total Active Projects: ${summary.projectsCompleted + summary.projectsOnTrack + summary.projectsAtRisk}
+• Projects Completed: ${sum.projectsCompleted}
+• Projects On Track: ${sum.projectsOnTrack}
+• Projects At Risk: ${sum.projectsAtRisk}
+• Total Active Projects: ${sum.projectsCompleted + sum.projectsOnTrack + sum.projectsAtRisk}
 
-🎯 KEY MILESTONES ACHIEVED
-${summary.keyMilestones.map((m: string) => `• ${m}`).join("\n")}
+🎯 KEY MILESTONES
+${sum.keyMilestones.map((m: string) => `• ${m}`).join("\n") || "• —"}
 
-⚠️ CRITICAL ISSUES REQUIRING ATTENTION
-${summary.criticalIssues.length > 0 ? summary.criticalIssues.map((i: string) => `• ${i}`).join("\n") : "• No critical issues identified"}
+⚠️ CRITICAL ISSUES
+${sum.criticalIssues.map((m: string) => `• ${m}`).join("\n") || "• —"}
 
-📈 KPI PERFORMANCE SUMMARY
-${summary.kpiSummary
-  .map((k: any) => `• ${k.name}: ${k.current}/${k.target} ${k.trend === "up" ? "↗️" : k.trend === "down" ? "↘️" : "→"}`)
-  .join("\n")}
+📈 KPI PERFORMANCE
+${sum.kpiSummary
+  .map((k: any) => `• ${k.name}: ${k.current}/${k.target} ${k.trend === "up" ? "↗" : k.trend === "down" ? "↘" : "→"}`)
+  .join("\n") || "• —"}
 
 🚀 NEXT WEEK PRIORITIES
-${summary.nextWeekPriorities.map((p: string) => `• ${p}`).join("\n")}
-
-═══════════════════════════════════════════════════════════════
-
-📋 EXECUTIVE SUMMARY
-${analysis.tldr || "Analysis pending..."}
-
-🔍 DETAILED ANALYSIS
-${analysis.summary || "Detailed analysis will be available after CEO analysis is generated."}
+${sum.nextWeekPriorities.map((m: string) => `• ${m}`).join("\n") || "• —"}
 
 ═══════════════════════════════════════════════════════════════
 Generated: ${new Date().toLocaleString()}
-Dashboard Version: v64
-`.trim()
+Dashboard Version: v65
+    `.trim();
 
-    const blob = new Blob([reportContent], { type: "text/plain;charset=utf-8" })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement("a")
-    a.href = url
-    a.download = `Weekly_Summary_${summary.week}_${variant}_${scenario}.txt`
-    a.click()
-    URL.revokeObjectURL(url)
-  }
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `Weekly_Summary_${sum.week}_${variant}_${scenario}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
-  const generateComprehensiveReportPDF = async () => {
-    const PAGE_W = 595
-    const PAGE_H = 842
-    const M = 40
-    const LINE = 16
-    const GAP = 10
+  /** ------------------- Comprehensive PDF export ------------------- */
+  const generateComprehensiveReportPDF = () => {
+    const PAGE_W = 595;
+    const PAGE_H = 842;
+    const M = 40;
+    const LINE = 14;
+    const GAP = 8;
 
-    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" })
-    let y = M
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+    let y = M;
 
     const ensureSpace = (needed: number) => {
       if (y + needed > PAGE_H - M) {
-        doc.addPage()
-        y = M
+        doc.addPage();
+        y = M;
       }
-    }
-
-    const header = () => {
-      doc.setFont("helvetica", "bold")
-      doc.setFontSize(16)
-      doc.text("VitalTrace – Comprehensive Scale-Up Report", M, y)
-      y += 22
-      doc.setFont("helvetica", "normal")
-      doc.setFontSize(11)
-      doc.text(`Generated: ${new Date().toLocaleString()}`, M, y)
-      y += 16
-      doc.text(`Scenario: ${scenario}  •  Variant: ${variant}`, M, y)
-      y += 16
-      doc.setDrawColor(200, 200, 200)
-      doc.line(M, y, PAGE_W - M, y)
-      y += 14
-    }
-
+    };
+    const hr = () => {
+      ensureSpace(12);
+      doc.setDrawColor(210, 210, 210);
+      doc.line(M, y, PAGE_W - M, y);
+      y += 12;
+    };
     const title = (t: string) => {
-      ensureSpace(28)
-      doc.setFont("helvetica", "bold")
-      doc.setFontSize(13)
-      doc.text(t, M, y)
-      y += 18
-      doc.setFont("helvetica", "normal")
-      doc.setFontSize(10)
-    }
+      ensureSpace(22);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(13);
+      doc.text(t, M, y);
+      y += 18;
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(10);
+    };
+    const addWrapped = (text: string, indent = 0, size = 10, lh = LINE) => {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(size);
+      const maxW = PAGE_W - 2 * M - indent;
+      const lines = doc.splitTextToSize(text, maxW);
+      lines.forEach((ln: string) => {
+        ensureSpace(lh);
+        doc.text(ln, M + indent, y);
+        y += lh;
+      });
+    };
 
-    const bullets = (arr: string[]) => {
-      const maxW = PAGE_W - 2 * M
-      arr.forEach((s) => {
-        const lines = doc.splitTextToSize(s, maxW)
-        lines.forEach((ln) => {
-          ensureSpace(LINE)
-          doc.text(ln, M, y)
-          y += LINE
-        })
-      })
-      y += GAP
-    }
+    // header
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("VitalTrace – Comprehensive Scale-Up Report", M, y);
+    y += 22;
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(10);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, M, y);
+    y += 14;
+    doc.text(`Scenario: ${scenario}  •  Variant: ${variant}`, M, y);
+    y += 10;
+    hr();
 
-    const projects = ensureArray(currentVariantData.projects).map((r: any[]) => ({
-      id: r?.[0] ?? "",
-      name: r?.[1] ?? "",
-      phase: r?.[2] ?? "",
-      priority: r?.[3] ?? "",
-      owner: r?.[4] ?? "",
-      start: r?.[5] ?? "",
-      end: r?.[6] ?? "",
-      deliverables: r?.[8] ?? "",
-      goal: r?.[9] ?? "",
-      capex: r?.[17] ?? 0,
-      opex: r?.[18] ?? 0,
-      percent: r?.[19] ?? 0,
-      status: r?.[22] ?? "",
-    }))
+    // Projects
+    title("Projects");
+    if (!projects.length) addWrapped("• No projects found.");
+    projects.forEach((p) => {
+      const name = p?.[1] ?? "Project";
+      const status = p?.[22] || p?.[2] || "—";
+      addWrapped(`• ${name}  [${status}]`);
+      addWrapped(`Owner: ${p?.[4] || "—"}`, 16);
+      addWrapped(`Dates: ${p?.[5] || "—"} → ${p?.[6] || "—"}`, 16);
+      addWrapped(`Goal: ${p?.[9] || "—"}`, 16);
+      addWrapped(`CapEx: ${currency(p?.[17])} • OpEx: ${currency(p?.[18])} • Progress: ${p?.[19] || 0}%`, 16);
+      y += GAP;
+    });
+    hr();
 
-    const resources = ensureArray(currentVariantData.resources).map((r: any[]) => ({
-      role: r?.[0] ?? "",
-      type: r?.[1] ?? "",
-      qty: r?.[2] ?? 0,
-      cost: r?.[3] ?? 0,
-      dept: r?.[4] ?? "",
-      notes: r?.[5] ?? "",
-    }))
+    // Resources
+    title("Resources");
+    if (!resources.length) addWrapped("• No resources found.");
+    resources.forEach((r) => {
+      addWrapped(`• ${r?.[0] || "Role"} — ${r?.[1] || "Type"} — Qty ${r?.[2] || 0} — ${currency(r?.[3])} — ${r?.[4] || "Dept"}`);
+      if (r?.[5]) addWrapped(`Notes: ${r?.[5]}`, 16);
+      y += GAP;
+    });
+    hr();
 
-    const risks = ensureArray(currentVariantData.risks).map((r: any[]) => ({
-      id: r?.[0] ?? "",
-      risk: r?.[1] ?? "",
-      impact: r?.[2] ?? "",
-      prob: r?.[3] ?? "",
-      mitigation: r?.[4] ?? "",
-      owner: r?.[5] ?? "",
-      due: r?.[6] ?? "",
-      status: r?.[7] ?? "",
-    }))
+    // Risks
+    title("Risks");
+    if (!risks.length) addWrapped("• No risks found.");
+    risks.forEach((r) => {
+      addWrapped(
+        `• (${r?.[0] || "ID"}) ${r?.[1] || "Risk"} — Impact ${r?.[2] || "—"}, Prob ${r?.[3] || "—"} — Owner ${r?.[5] || "—"} — Due ${r?.[6] || "—"} — ${r?.[7] || "Open"}`
+      );
+      if (r?.[4]) addWrapped(`Mitigation: ${r?.[4]}`, 16);
+      y += GAP;
+    });
+    hr();
 
-    const meetings = meetingsList.map((m) => ({
-      ...m,
-    }))
+    // Meetings
+    title("Meetings");
+    if (!meetings.length) addWrapped("• No meetings found.");
+    meetings.forEach((m) => {
+      addWrapped(`• ${m?.[0] || "Meeting"} — ${m?.[1] || ""} ${m?.[2] || ""} — ${m?.[3] || ""} — ${m?.[6] || "Scheduled"}`);
+      addWrapped(`Attendees: ${m?.[4] || "—"}`, 16);
+      addWrapped(`Location: ${m?.[5] || "—"}`, 16);
+      if (m?.[7]) addWrapped(`Agenda: ${m?.[7]}`, 16);
+      if (m?.[8]) addWrapped(`Notes: ${m?.[8]}`, 16);
+      y += GAP;
+    });
+    hr();
 
-    const kpiRows = ensureArray(kpis).map((k: KPI) => ({
-      name: k.name,
-      current: k.current_value,
-      target: k.target_value,
-      unit: k.unit,
-      owner: k.owner,
-    }))
+    // KPIs
+    title("KPIs");
+    if (!kpis.length) addWrapped("• No KPIs defined.");
+    kpis.forEach((k) => {
+      addWrapped(`• ${k.name}: ${k.current_value}${k.unit} / ${k.target_value}${k.unit} — Owner: ${k.owner || "—"}`);
+    });
 
-    header()
+    ensureSpace(28);
+    hr();
+    doc.setFontSize(9);
+    doc.text(`End of report • Scenario ${scenario} • Variant ${variant}`, M, y);
+    doc.save(`VitalTrace_Comprehensive_Report_${variant}_${scenario}.pdf`);
+  };
 
-    title("Projects")
-    bullets(
-      projects.length
-        ? projects.map(
-            (p) =>
-              `• [${p.status}] ${p.name} (${p.phase}, ${p.priority}) — Owner: ${p.owner} — ${p.start} → ${p.end} — CapEx $${p.capex} / OpEx $${p.opex} — ${p.percent}%`,
-          )
-        : ["• No projects found."],
-    )
+  /** ----------------------- Row helpers (tabs) ----------------------- */
+  const addProject = () => {
+    setProjects((prev) => [
+      ...prev,
+      [
+        `PROJ-${Date.now()}`,
+        "New Project",
+        "Planning",
+        "Must",
+        "Project Manager",
+        new Date().toISOString().slice(0, 10),
+        new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
+        0,
+        "",
+        "",
+        "R",
+        "A",
+        "C",
+        "I",
+        "",
+        "",
+        "",
+        0,
+        0,
+        0,
+        "",
+        "false",
+        "GREEN",
+        0,
+      ],
+    ]);
+  };
+  const deleteProject = (i: number) => setProjects((prev) => prev.filter((_, idx) => idx !== i));
+  const editProject = (i: number, j: number, v: any) =>
+    setProjects((prev) => {
+      const n = [...prev];
+      n[i] = [...n[i]];
+      n[i][j] = v;
+      return n;
+    });
 
-    title("Resources")
-    bullets(
-      resources.length
-        ? resources.map((r) => `• ${r.role} — ${r.type} — Qty ${r.qty} — $${r.cost} — ${r.dept}`)
-        : ["• No resources found."],
-    )
+  const addManufacturing = () =>
+    setManufacturing((prev) => [...prev, ["New Process", 0, 1, 100, 0, "Manual Station", "Manual", "Planning", "Owner"]]);
+  const deleteManufacturing = (i: number) => setManufacturing((prev) => prev.filter((_, idx) => idx !== i));
+  const editManufacturing = (i: number, j: number, v: any) =>
+    setManufacturing((prev) => {
+      const n = [...prev];
+      n[i] = [...n[i]];
+      n[i][j] = v;
+      return n;
+    });
 
-    title("Risks")
-    bullets(
-      risks.length
-        ? risks.map(
-            (r) =>
-              `• (${r.id}) ${r.risk} — Impact ${r.impact}, Prob ${r.prob} — Mitigation: ${r.mitigation} — Owner: ${r.owner} — Due: ${r.due} — ${r.status}`,
-          )
-        : ["• No risks found."],
-    )
+  const addResource = () => setResources((prev) => [...prev, ["New Resource", "Personnel", 1, 0, "Department", ""]]);
+  const deleteResource = (i: number) => setResources((prev) => prev.filter((_, idx) => idx !== i));
+  const editResource = (i: number, j: number, v: any) =>
+    setResources((prev) => {
+      const n = [...prev];
+      n[i] = [...n[i]];
+      n[i][j] = v;
+      return n;
+    });
 
-    title("Meetings")
-    if (meetings.length === 0) {
-      bullets(["• No meetings found."])
-    } else {
-      const maxW = PAGE_W - 2 * M
-      meetings.forEach((m) => {
-        const headerLine = `• ${m.title} — ${m.date} ${m.time} — ${m.duration} — ${m.attendees} — ${m.status} — ${m.location}`
-        const headLines = doc.splitTextToSize(headerLine, maxW)
-        headLines.forEach((ln) => {
-          ensureSpace(LINE)
-          doc.text(ln, M, y)
-          y += LINE
-        })
-        if (m.agenda && m.agenda.trim().length > 0) {
-          const agendaLines = doc.splitTextToSize(`Agenda: ${m.agenda}`, maxW)
-          agendaLines.forEach((ln) => {
-            ensureSpace(LINE)
-            doc.text(ln, M + 14, y)
-            y += LINE
-          })
-        }
-        if (m.notes && m.notes.trim().length > 0) {
-          const notesLines = doc.splitTextToSize(`Notes: ${m.notes}`, maxW)
-          notesLines.forEach((ln) => {
-            ensureSpace(LINE)
-            doc.text(ln, M + 14, y)
-            y += LINE
-          })
-        }
-        y += GAP
-      })
-    }
+  const addRisk = () =>
+    setRisks((prev) => [...prev, [`RISK-${Date.now()}`, "New risk", "M", "M", "Mitigation", "Owner", new Date().toISOString().slice(0, 10), "Open"]]);
+  const deleteRisk = (i: number) => setRisks((prev) => prev.filter((_, idx) => idx !== i));
+  const editRisk = (i: number, j: number, v: any) =>
+    setRisks((prev) => {
+      const n = [...prev];
+      n[i] = [...n[i]];
+      n[i][j] = v;
+      return n;
+    });
 
-    title("KPIs")
-    bullets(
-      kpiRows.length
-        ? kpiRows.map((k) => `• ${k.name}: ${k.current}${k.unit} / ${k.target}${k.unit} — Owner: ${k.owner}`)
-        : ["• No KPIs defined."],
-    )
+  const addMeeting = () =>
+    setMeetings((prev) => [
+      ...prev,
+      ["Weekly Status", new Date().toISOString().slice(0, 10), "10:00", "60 min", "Team", "Room A", "Scheduled", "1) Updates\n2) Risks", ""],
+    ]);
+  const deleteMeeting = (i: number) => setMeetings((prev) => prev.filter((_, idx) => idx !== i));
+  const editMeeting = (i: number, j: number, v: any) =>
+    setMeetings((prev) => {
+      const n = [...prev];
+      n[i] = [...n[i]];
+      n[i][j] = v;
+      return n;
+    });
 
-    ensureSpace(30)
-    doc.setDrawColor(200, 200, 200)
-    doc.line(40, y, PAGE_W - 40, y)
-    y += 14
-    doc.setFontSize(9)
-    doc.text(`End of report • Scenario ${scenario} • Variant ${variant}`, 40, y)
+  const addKPI = () =>
+    setKpis((prev) => [
+      ...prev,
+      {
+        id: `kpi-${Date.now()}`,
+        name: "New KPI",
+        current_value: 0,
+        target_value: 100,
+        unit: "%",
+        owner: "Owner",
+        scenario_id: `scenario-${scenario}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ]);
+  const deleteKPI = (id: string) => setKpis((prev) => prev.filter((k) => k.id !== id));
+  const editKPI = (id: string, field: keyof KPI, value: any) =>
+    setKpis((prev) =>
+      prev.map((k) => (k.id === id ? { ...k, [field]: field.includes("value") ? Number(value) || 0 : value, updated_at: new Date().toISOString() } : k))
+    );
 
-    doc.save(`VitalTrace_Comprehensive_Report_${variant}_${scenario}.pdf`)
-  }
+  const addFinancial = () => setFinancials((prev) => [...prev, ["COGS", "Item", 0, "Expense", ""]]);
+  const deleteFinancial = (i: number) => setFinancials((prev) => prev.filter((_, idx) => idx !== i));
+  const editFinancial = (i: number, j: number, v: any) =>
+    setFinancials((prev) => {
+      const n = [...prev];
+      n[i] = [...n[i]];
+      n[i][j] = j === 2 ? Number(v) || 0 : v;
+      return n;
+    });
 
-  // ---------- Loading/Error screens ----------
+  const addGlossary = () => setGlossary((prev) => [...prev, ["New Term", "Definition"]]);
+  const deleteGlossary = (i: number) => setGlossary((prev) => prev.filter((_, idx) => idx !== i));
+  const editGlossary = (i: number, j: number, v: any) =>
+    setGlossary((prev) => {
+      const n = [...prev];
+      n[i] = [...n[i]];
+      n[i][j] = v;
+      return n;
+    });
+
+  /** ------------------------------ UI ------------------------------ */
   if (loading) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="text-center space-y-4">
-          <div className="flex items-center justify-center space-x-2">
-            <Loader2 className="h-6 w-6 animate-spin" />
-            <span className="text-lg font-medium">Loading Your Project…</span>
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <div className="flex items-center justify-center gap-2">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            <span>Loading dashboard…</span>
           </div>
-          <p className="text-sm text-muted-foreground">Retrieving your latest data from the database…</p>
-          <Button variant="outline" onClick={() => setLoading(false)} className="mt-4">
-            Skip Loading
-          </Button>
+          <div className="text-sm text-muted-foreground">If prompted, sign in to your Supabase-authenticated app.</div>
         </div>
       </div>
-    )
+    );
   }
-
-  if (error) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="text-center space-y-4">
-          <div className="flex items-center justify-center space-x-2">
-            <Loader2 className="h-6 w-6" />
-            <span className="text-lg font-medium">Dashboard</span>
-          </div>
-        <p className="text-red-600 text-sm">{error}</p>
-          <Button variant="outline" onClick={() => setError(null)}>
-            Dismiss
-          </Button>
-        </div>
-      </div>
-    )
-  }
-
-  // ---------- UI ----------
-  const meetingsSelected = selectedMeetingIdx >= 0 && selectedMeetingIdx < meetingsList.length ? meetingsList[selectedMeetingIdx] : null
-
-  const meetingsHeaders = ["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes"]
-  const manufacturingHeaders = [
-    "Process",
-    "Time (min)",
-    "Batch Size",
-    "Yield (%)",
-    "Cycle Time (s)",
-    "Equipment",
-    "Type",
-    "Status",
-    "Operator",
-  ]
-  const resourcesHeaders = ["Resource", "Type", "Quantity", "Cost", "Department", "Notes"]
-  const risksHeaders = ["Risk", "Impact", "Probability", "Mitigation", "Owner", "Status"]
-  const financialHeaders = ["Category", "Item", "Amount", "Type", "Notes"]
-  const glossaryHeaders = ["Term", "Definition"]
 
   return (
-    <div className="p-4 space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-        <div className="flex gap-2 flex-wrap">
-          <Button variant={activeTab === "overview" ? "default" : "outline"} onClick={() => setActiveTab("overview")}>
-            Overview
-          </Button>
-          <Button variant={activeTab === "projects" ? "default" : "outline"} onClick={() => setActiveTab("projects")}>
-            Projects
-          </Button>
-          <Button variant={activeTab === "manufacturing" ? "default" : "outline"} onClick={() => setActiveTab("manufacturing")}>
-            Manufacturing
-          </Button>
-          <Button variant={activeTab === "resources" ? "default" : "outline"} onClick={() => setActiveTab("resources")}>
-            Resources
-          </Button>
-          <Button variant={activeTab === "risks" ? "default" : "outline"} onClick={() => setActiveTab("risks")}>
-            Risks
-          </Button>
-          <Button variant={activeTab === "meetings" ? "default" : "outline"} onClick={() => setActiveTab("meetings")}>
-            Meetings
-          </Button>
-          <Button variant={activeTab === "kpis" ? "default" : "outline"} onClick={() => setActiveTab("kpis")}>
-            KPIs
-          </Button>
-          <Button variant={activeTab === "financials" ? "default" : "outline"} onClick={() => setActiveTab("financials")}>
-            Financials
-          </Button>
-          <Button variant={activeTab === "glossary" ? "default" : "outline"} onClick={() => setActiveTab("glossary")}>
-            Glossary
-          </Button>
-          <Button variant={activeTab === "config" ? "default" : "outline"} onClick={() => setActiveTab("config")}>
-            Config
-          </Button>
+    <div className="p-5 space-y-5">
+      {/* Top bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <select
+            className="border rounded px-3 py-2 text-sm"
+            value={scenario}
+            onChange={(e) => setScenario(e.target.value as ScenarioKey)}
+          >
+            <option value="50k">50k</option>
+            <option value="200k">200k</option>
+          </select>
+          <select
+            className="border rounded px-3 py-2 text-sm"
+            value={variant}
+            onChange={(e) => setVariant(e.target.value as Variant)}
+          >
+            <option>Recess Nanodispensing</option>
+            <option>Dipcoating</option>
+          </select>
+
+          <span className="text-xs text-slate-500">
+            {saving ? "Saving…" : `Last sync ${syncStatus.lastSync.toLocaleTimeString()} ${syncStatus.isOnline ? "✓" : "• offline"}`}
+          </span>
         </div>
 
-        <div className="flex gap-2">
-          <Button onClick={exportWeeklySummary}>Weekly Summary (TXT)</Button>
-          <Button onClick={generateComprehensiveReportPDF} className="gap-2">
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={exportWeeklySummary} className="gap-2">
+            <FileText className="h-4 w-4" />
+            Weekly Summary (TXT)
+          </Button>
+          <Button variant="default" size="sm" onClick={generateComprehensiveReportPDF} className="gap-2">
             <TrendingUp className="h-4 w-4" />
             Comprehensive Report (PDF)
           </Button>
+          <Button variant="outline" size="sm" onClick={saveAll} className="gap-2">
+            <Save className="h-4 w-4" />
+            Save now
+          </Button>
         </div>
       </div>
 
-      {activeTab === "overview" && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <div className="rounded-xl border p-4 bg-card">
-            <div className="text-sm text-muted-foreground">Production Target</div>
-            <div className="text-2xl font-semibold">{overviewMetrics.targetProduction.toLocaleString()} units/yr</div>
-            <div className="text-xs mt-1">Capacity Utilization: {overviewMetrics.capacityUtilization}%</div>
-          </div>
-          <div className="rounded-xl border p-4 bg-card">
-            <div className="text-sm text-muted-foreground">Financials</div>
-            <div className="text-2xl font-semibold">${(overviewMetrics.annualRevenue / 1_000_000).toFixed(1)}M revenue</div>
-            <div className="text-xs mt-1">
-              Profit margin: {overviewMetrics.profitMargin}% • CPU ${Number(overviewMetrics.costPerUnit).toFixed(2)}
+      {/* Tabs */}
+      <div className="flex gap-2 flex-wrap">
+        {["Overview", "Projects", "Manufacturing", "Resources", "Risks", "Meetings", "KPIs", "Financials", "Glossary", "Config"].map((t) => (
+          <button
+            key={t}
+            onClick={() => setActiveTab(t as any)}
+            className={`text-sm px-3 py-1.5 rounded border ${activeTab === t ? "bg-slate-900 text-white" : "bg-white hover:bg-slate-50"}`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      {activeTab === "Overview" && (
+        <div className="grid md:grid-cols-2 gap-4">
+          <div className="border rounded-lg p-4">
+            <div className="font-semibold mb-2">Production</div>
+            <div className="text-sm space-y-1">
+              <div>Target units/year: {scenarioCfg.unitsPerYear.toLocaleString()}</div>
+              <div>Capacity utilization: {overview.capacityUtil}%</div>
             </div>
           </div>
-          <div className="rounded-xl border p-4 bg-card">
-            <div className="text-sm text-muted-foreground">Portfolio</div>
-            <div className="text-2xl font-semibold">{overviewMetrics.totalProjects} projects</div>
-            <div className="text-xs mt-1">
-              {overviewMetrics.completedProjects} completed • {overviewMetrics.highPriorityRisks} high risks
+          <div className="border rounded-lg p-4">
+            <div className="font-semibold mb-2">Projects</div>
+            <div className="text-sm space-y-1">
+              <div>Total: {overview.totalProjects}</div>
+              <div>Active: {overview.active}</div>
+              <div>Completed: {overview.completed}</div>
+              <div>At Risk: {overview.atRisk}</div>
             </div>
+          </div>
+          <div className="border rounded-lg p-4">
+            <div className="font-semibold mb-2">KPIs</div>
+            <div className="text-sm">KPI Health: {overview.kpiHealth}%</div>
+          </div>
+          <div className="border rounded-lg p-4">
+            <div className="font-semibold mb-2">Resources</div>
+            <div className="text-sm">Total headcount (qty sum): {overview.totalResources}</div>
           </div>
         </div>
       )}
 
-      {activeTab === "projects" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full text-sm" style={{ minWidth: `${projectsTableMinW}px` }}>
-            <colgroup>
-              {projectsWidths.map((w, i) => (
-                <col key={`col-${i}`} style={{ width: `${w}px` }} />
-              ))}
-            </colgroup>
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {projectsHeaders.map((h, idx) => (
-                  <th key={h} className={`whitespace-nowrap ${idx >= 10 && idx <= 13 ? "text-center" : ""}`}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {projectRows.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t align-top">
-                  {row.map((cell: any, cIdx: number) => {
-                    const isLongText = [8, 9, 14, 15, 16].includes(cIdx)
-                    const isRACI = cIdx >= 10 && cIdx <= 13
-                    return (
-                      <td key={`${rIdx}-${cIdx}`} className={`align-top ${isRACI ? "text-center" : ""}`}>
-                        {isLongText ? (
+      {activeTab === "Projects" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">Projects</div>
+            <Button size="sm" onClick={addProject} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Project
+            </Button>
+          </div>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1600px] text-sm">
+              <colgroup>
+                <col width={90} />
+                <col width={220} />
+                <col width={120} />
+                <col width={100} />
+                <col width={160} />
+                <col width={120} />
+                <col width={120} />
+                <col width={80} />
+                <col width={230} />
+                <col width={260} />
+                <col width={50} />
+                <col width={50} />
+                <col width={50} />
+                <col width={50} />
+                <col width={160} />
+                <col width={160} />
+                <col width={120} />
+                <col width={120} />
+                <col width={120} />
+                <col width={110} />
+                <col width={120} />
+                <col width={80} />
+                <col width={100} />
+                <col width={90} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {[
+                    "id",
+                    "name",
+                    "type",
+                    "moscow",
+                    "owner",
+                    "start",
+                    "finish",
+                    "dependencies",
+                    "deliverables",
+                    "goal",
+                    "R",
+                    "A",
+                    "C",
+                    "I",
+                    "needs",
+                    "barriers",
+                    "risks",
+                    "budget_capex",
+                    "budget_opex",
+                    "percent_complete",
+                    "process_link",
+                    "critical",
+                    "status",
+                    "slack_days",
+                    "",
+                  ].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {projects.map((row, i) => (
+                  <tr key={i} className="border-b align-top">
+                    {row.map((cell: any, j: number) => (
+                      <td key={j} className="px-2 py-1">
+                        {j === 5 || j === 6 ? (
+                          <input
+                            type="date"
+                            className="w-full border rounded px-2 py-1"
+                            value={String(cell || "").slice(0, 10)}
+                            onChange={(e) => editProject(i, j, e.target.value)}
+                          />
+                        ) : j === 17 || j === 18 || j === 19 || j === 23 || j === 7 ? (
+                          <input
+                            className="w-full border rounded px-2 py-1"
+                            type="number"
+                            value={cell ?? 0}
+                            onChange={(e) => editProject(i, j, Number(e.target.value))}
+                          />
+                        ) : j === 8 || j === 9 || j === 14 || j === 15 || j === 16 || j === 20 ? (
                           <textarea
-                            className="block w-full rounded-md border px-2 py-1 text-sm resize-none whitespace-pre-wrap break-words leading-snug min-h-[84px]"
+                            className="w-full border rounded px-2 py-1 min-h-[38px]"
                             value={cell ?? ""}
-                            onChange={(e) => handleProjectCellChange(rIdx, cIdx, e.target.value)}
+                            onChange={(e) => editProject(i, j, e.target.value)}
                           />
                         ) : (
                           <input
-                            className={`block w-full rounded-md border px-2 py-1 text-sm leading-tight h-9 ${isRACI ? "text-center" : ""}`}
+                            className="w-full border rounded px-2 py-1"
                             value={cell ?? ""}
-                            onChange={(e) => handleProjectCellChange(rIdx, cIdx, e.target.value)}
+                            onChange={(e) => editProject(i, j, e.target.value)}
                           />
                         )}
                       </td>
-                    )
-                  })}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    ))}
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteProject(i)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!projects.length && (
+                  <tr>
+                    <td colSpan={25} className="px-3 py-6 text-center text-slate-500">
+                      No projects yet. Click “Add Project”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      {activeTab === "manufacturing" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[1400px] text-sm">
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {manufacturingHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {manufacturingProcesses.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t">
-                  {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`}>
-                      <input
-                        className="block w-full min-w-[140px] rounded-md border px-2 py-1 text-sm h-9"
-                        value={cell ?? ""}
-                        onChange={(e) =>
-                          setManufacturingProcesses((prev) => {
-                            const copy = prev.map((r) => [...r])
-                            copy[rIdx][cIdx] = e.target.value
-                            return copy
-                          })
-                        }
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="p-3">
-            <Button
-              variant="outline"
-              onClick={() =>
-                setManufacturingProcesses((prev) => [
-                  ...prev,
-                  ["New Process", 0, 1, 100, 0, "Manual Station", "Manual", "Planning", "Owner"],
-                ])
-              }
-            >
-              Add Manufacturing Item
+      {activeTab === "Manufacturing" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">Manufacturing</div>
+            <Button size="sm" onClick={addManufacturing} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Process
             </Button>
           </div>
-        </div>
-      )}
-
-      {activeTab === "resources" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[1100px] text-sm">
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {resourcesHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {resourcesData.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t">
-                  {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`}>
-                      <input
-                        className="block w-full min-w-[160px] rounded-md border px-2 py-1 text-sm h-9"
-                        value={cell ?? ""}
-                        onChange={(e) =>
-                          setResourcesData((prev) => {
-                            const copy = prev.map((r) => [...r])
-                            copy[rIdx][cIdx] = e.target.value
-                            return copy
-                          })
-                        }
-                      />
-                    </td>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1200px] text-sm">
+              <colgroup>
+                <col width={240} />
+                <col width={90} />
+                <col width={90} />
+                <col width={90} />
+                <col width={110} />
+                <col width={200} />
+                <col width={140} />
+                <col width={140} />
+                <col width={140} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {["Process", "Time (min)", "Batch Size", "Yield (%)", "Cycle Time (s)", "Equipment", "Type", "Status", "Owner", ""].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {activeTab === "risks" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[1200px] text-sm">
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {risksHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {risksData.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t">
-                  {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`}>
-                      <input
-                        className="block w-full min-w-[160px] rounded-md border px-2 py-1 text-sm h-9"
-                        value={cell ?? ""}
-                        onChange={(e) =>
-                          setRisksData((prev) => {
-                            const copy = prev.map((r) => [...r])
-                            copy[rIdx][cIdx] = e.target.value
-                            return copy
-                          })
-                        }
-                      />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {activeTab === "meetings" && (
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-          <div className="xl:col-span-4 rounded-xl border bg-card">
-            <div className="flex items-center justify-between p-3 border-b">
-              <div className="font-medium">Meetings</div>
-              <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={addMeeting} className="gap-2">
-                  <Plus className="h-4 w-4" />
-                  Schedule
-                </Button>
-              </div>
-            </div>
-            <div className="max-h-[520px] overflow-y-auto divide-y">
-              {meetingsList.length === 0 && <div className="p-3 text-sm text-muted-foreground">No meetings yet.</div>}
-              {meetingsList.map((m, idx) => (
-                <button
-                  key={`${m.title}-${idx}`}
-                  className={`w-full text-left p-3 hover:bg-muted/50 ${idx === selectedMeetingIdx ? "bg-muted" : ""}`}
-                  onClick={() => setSelectedMeetingIdx(idx)}
-                >
-                  <div className="font-medium">{m.title}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {m.date} • {m.time} • {m.duration}
-                  </div>
-                  <div className="text-xs truncate">{m.location}</div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="xl:col-span-8 rounded-xl border bg-card">
-            <div className="flex items-center justify-between p-3 border-b">
-              <div className="font-medium">Meeting Details</div>
-              <div className="flex gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={exportSelectedMeetingICS}
-                  disabled={!meetingsSelected}
-                  className="gap-2"
-                >
-                  <CalendarIcon className="h-4 w-4" />
-                  Export .ics
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={exportSelectedMeetingPDF}
-                  disabled={!meetingsSelected}
-                  className="gap-2"
-                >
-                  <FileText className="h-4 w-4" />
-                  Export PDF
-                </Button>
-                {meetingsSelected && (
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => deleteMeeting(selectedMeetingIdx)}
-                    className="gap-2"
-                  >
-                    <X className="h-4 w-4" />
-                    Delete
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            {!meetingsSelected && <div className="p-4 text-sm text-muted-foreground">Select a meeting to edit.</div>}
-
-            {meetingsSelected && (
-              <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">Title</label>
-                  <input
-                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
-                    value={meetingsSelected.title}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "title", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">Date</label>
-                  <input
-                    type="date"
-                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
-                    value={meetingsSelected.date}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "date", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">Time</label>
-                  <input
-                    type="time"
-                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
-                    value={meetingsSelected.time}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "time", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">Duration</label>
-                  <input
-                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
-                    value={meetingsSelected.duration}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "duration", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-xs text-muted-foreground">Attendees</label>
-                  <input
-                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
-                    value={meetingsSelected.attendees}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "attendees", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-xs text-muted-foreground">Location</label>
-                  <input
-                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
-                    value={meetingsSelected.location}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "location", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-xs text-muted-foreground">Status</label>
-                  <input
-                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
-                    value={meetingsSelected.status}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "status", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-xs text-muted-foreground">Agenda</label>
-                  <textarea
-                    className="block w-full rounded-md border px-2 py-2 text-sm min-h-[120px] resize-none whitespace-pre-wrap"
-                    value={meetingsSelected.agenda}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "agenda", e.target.value)}
-                  />
-                </div>
-
-                <div className="space-y-2 md:col-span-2">
-                  <label className="text-xs text-muted-foreground">Notes</label>
-                  <textarea
-                    className="block w-full rounded-md border px-2 py-2 text-sm min-h-[140px] resize-none whitespace-pre-wrap"
-                    value={meetingsSelected.notes}
-                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "notes", e.target.value)}
-                  />
-                </div>
-
-                <div className="md:col-span-2 flex justify-end gap-2">
-                  <Button onClick={saveProjectDataToDatabase} className="gap-2">
-                    <Save className="h-4 w-4" />
-                    Save
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            <div className="border-t p-3">
-              <div className="text-xs text-muted-foreground mb-2">Quick Table</div>
-              <div className="overflow-x-auto">
-                <table className="table-fixed w-full min-w-[1500px] text-sm">
-                  <thead>
-                    <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                      {meetingsHeaders.map((h) => (
-                        <th key={h} className="whitespace-nowrap">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2">
-                    {meetingsList.map((m, idx) => (
-                      <tr key={`tbl-${idx}`} className="border-t">
-                        <td className="whitespace-nowrap">{m.title}</td>
-                        <td className="whitespace-nowrap">{m.date}</td>
-                        <td className="whitespace-nowrap">{m.time}</td>
-                        <td className="whitespace-nowrap">{m.duration}</td>
-                        <td className="whitespace-nowrap">{m.attendees}</td>
-                        <td className="whitespace-nowrap">{m.location}</td>
-                        <td className="whitespace-nowrap">{m.status}</td>
-                        <td className="max-w-[360px]">
-                          <div className="truncate">{m.agenda}</div>
-                        </td>
-                        <td className="max-w-[360px]">
-                          <div className="truncate">{m.notes}</div>
-                        </td>
-                      </tr>
+              </thead>
+              <tbody>
+                {manufacturing.map((r, i) => (
+                  <tr key={i} className="border-b">
+                    {r.map((c: any, j: number) => (
+                      <td key={j} className="px-2 py-1">
+                        {j === 1 || j === 2 || j === 3 || j === 4 ? (
+                          <input
+                            type="number"
+                            className="w-full border rounded px-2 py-1"
+                            value={c ?? 0}
+                            onChange={(e) => editManufacturing(i, j, Number(e.target.value))}
+                          />
+                        ) : j === 0 || j === 5 || j === 6 || j === 7 || j === 8 ? (
+                          <input
+                            className="w-full border rounded px-2 py-1"
+                            value={c ?? ""}
+                            onChange={(e) => editManufacturing(i, j, e.target.value)}
+                          />
+                        ) : (
+                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editManufacturing(i, j, e.target.value)} />
+                        )}
+                      </td>
                     ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteManufacturing(i)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!manufacturing.length && (
+                  <tr>
+                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
+                      No processes. Click “Add Process”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {activeTab === "kpis" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[900px] text-sm">
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                <th className="whitespace-nowrap">Name</th>
-                <th className="whitespace-nowrap">Current</th>
-                <th className="whitespace-nowrap">Target</th>
-                <th className="whitespace-nowrap">Unit</th>
-                <th className="whitespace-nowrap">Owner</th>
-                <th className="whitespace-nowrap w-[1%]">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {kpis.map((kpi, rIdx) => (
-                <tr key={kpi.id} className="border-t">
-                  <td>
-                    <input
-                      className="block w-full min-w-[220px] rounded-md border px-2 py-1 text-sm h-9"
-                      value={kpi.name}
-                      onChange={(e) =>
-                        setKpis((prev) => {
-                          const copy = prev.map((k) => ({ ...k }))
-                          copy[rIdx].name = e.target.value
-                          copy[rIdx].updated_at = new Date().toISOString()
-                          return copy
-                        })
-                      }
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="block w-full min-w-[120px] rounded-md border px-2 py-1 text-sm h-9"
-                      value={kpi.current_value}
-                      onChange={(e) =>
-                        setKpis((prev) => {
-                          const copy = prev.map((k) => ({ ...k }))
-                          copy[rIdx].current_value = parseFloat(e.target.value) || 0
-                          copy[rIdx].updated_at = new Date().toISOString()
-                          return copy
-                        })
-                      }
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="block w-full min-w-[120px] rounded-md border px-2 py-1 text-sm h-9"
-                      value={kpi.target_value}
-                      onChange={(e) =>
-                        setKpis((prev) => {
-                          const copy = prev.map((k) => ({ ...k }))
-                          copy[rIdx].target_value = parseFloat(e.target.value) || 0
-                          copy[rIdx].updated_at = new Date().toISOString()
-                          return copy
-                        })
-                      }
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="block w-full min-w-[100px] rounded-md border px-2 py-1 text-sm h-9"
-                      value={kpi.unit}
-                      onChange={(e) =>
-                        setKpis((prev) => {
-                          const copy = prev.map((k) => ({ ...k }))
-                          copy[rIdx].unit = e.target.value
-                          copy[rIdx].updated_at = new Date().toISOString()
-                          return copy
-                        })
-                      }
-                    />
-                  </td>
-                  <td>
-                    <input
-                      className="block w-full min-w-[180px] rounded-md border px-2 py-1 text-sm h-9"
-                      value={kpi.owner}
-                      onChange={(e) =>
-                        setKpis((prev) => {
-                          const copy = prev.map((k) => ({ ...k }))
-                          copy[rIdx].owner = e.target.value
-                          copy[rIdx].updated_at = new Date().toISOString()
-                          return copy
-                        })
-                      }
-                    />
-                  </td>
-                  <td className="w-[1%] whitespace-nowrap">
-                    <div className="flex gap-2">
-                      <Button size="sm" variant="destructive" onClick={() => setKpis((prev) => prev.filter((k) => k.id !== kpi.id))}>
-                        Delete
-                      </Button>
-                    </div>
-                  </td>
+      {activeTab === "Resources" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">Resources</div>
+            <Button size="sm" onClick={addResource} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Resource
+            </Button>
+          </div>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1000px] text-sm">
+              <colgroup>
+                <col width={240} />
+                <col width={140} />
+                <col width={100} />
+                <col width={120} />
+                <col width={160} />
+                <col width={260} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {["Resource", "Type", "Qty", "Cost", "Department", "Notes", ""].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="p-3">
-            <Button
-              variant="outline"
-              onClick={() =>
-                setKpis((prev) => [
-                  ...prev,
-                  {
-                    id: `kpi-${Date.now()}`,
-                    scenario_id: `scenario-${scenario}`,
-                    name: "New KPI",
-                    target_value: 100,
-                    current_value: 0,
-                    unit: "%",
-                    owner: "Owner",
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                  },
-                ])
-              }
-            >
+              </thead>
+              <tbody>
+                {resources.map((r, i) => (
+                  <tr key={i} className="border-b">
+                    {r.map((c: any, j: number) => (
+                      <td key={j} className="px-2 py-1">
+                        {j === 2 || j === 3 ? (
+                          <input
+                            type="number"
+                            className="w-full border rounded px-2 py-1"
+                            value={c ?? 0}
+                            onChange={(e) => editResource(i, j, Number(e.target.value))}
+                          />
+                        ) : j === 5 ? (
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={c ?? ""} onChange={(e) => editResource(i, j, e.target.value)} />
+                        ) : (
+                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editResource(i, j, e.target.value)} />
+                        )}
+                      </td>
+                    ))}
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteResource(i)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!resources.length && (
+                  <tr>
+                    <td colSpan={7} className="px-3 py-6 text-center text-slate-500">
+                      No resources. Click “Add Resource”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "Risks" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">Risks</div>
+            <Button size="sm" onClick={addRisk} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Risk
+            </Button>
+          </div>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1200px] text-sm">
+              <colgroup>
+                <col width={110} />
+                <col width={320} />
+                <col width={90} />
+                <col width={90} />
+                <col width={320} />
+                <col width={160} />
+                <col width={140} />
+                <col width={120} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {["id", "risk", "impact", "prob", "mitigation", "owner", "due", "status", ""].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {risks.map((r, i) => (
+                  <tr key={i} className="border-b align-top">
+                    {r.map((c: any, j: number) => (
+                      <td key={j} className="px-2 py-1">
+                        {j === 6 ? (
+                          <input type="date" className="w-full border rounded px-2 py-1" value={String(c || "").slice(0, 10)} onChange={(e) => editRisk(i, j, e.target.value)} />
+                        ) : j === 1 || j === 4 ? (
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={c ?? ""} onChange={(e) => editRisk(i, j, e.target.value)} />
+                        ) : (
+                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editRisk(i, j, e.target.value)} />
+                        )}
+                      </td>
+                    ))}
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteRisk(i)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!risks.length && (
+                  <tr>
+                    <td colSpan={9} className="px-3 py-6 text-center text-slate-500">
+                      No risks. Click “Add Risk”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "Meetings" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">Project Meetings</div>
+            <Button size="sm" onClick={addMeeting} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Meeting
+            </Button>
+          </div>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1400px] text-sm">
+              <colgroup>
+                <col width={220} />
+                <col width={120} />
+                <col width={100} />
+                <col width={100} />
+                <col width={220} />
+                <col width={180} />
+                <col width={140} />
+                <col width={260} />
+                <col width={320} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes", ""].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {meetings.map((r, i) => (
+                  <tr key={i} className="border-b align-top">
+                    {r.map((c: any, j: number) => (
+                      <td key={j} className="px-2 py-1">
+                        {j === 1 ? (
+                          <input type="date" className="w-full border rounded px-2 py-1" value={String(c || "").slice(0, 10)} onChange={(e) => editMeeting(i, j, e.target.value)} />
+                        ) : j === 7 || j === 8 ? (
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[50px]" value={c ?? ""} onChange={(e) => editMeeting(i, j, e.target.value)} />
+                        ) : (
+                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editMeeting(i, j, e.target.value)} />
+                        )}
+                      </td>
+                    ))}
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteMeeting(i)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!meetings.length && (
+                  <tr>
+                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
+                      No meetings. Click “Add Meeting”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "KPIs" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">KPIs</div>
+            <Button size="sm" onClick={addKPI} className="gap-2">
+              <Plus className="h-4 w-4" />
               Add KPI
             </Button>
           </div>
-        </div>
-      )}
-
-      {activeTab === "financials" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[1200px] text-sm">
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {financialHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {financialData.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t">
-                  {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`}>
-                      <input
-                        className="block w-full min-w-[180px] rounded-md border px-2 py-1 text-sm h-9"
-                        value={cell ?? ""}
-                        onChange={(e) =>
-                          setFinancialData((prev) => {
-                            const copy = prev.map((r) => [...r])
-                            copy[rIdx][cIdx] = e.target.value
-                            return copy
-                          })
-                        }
-                      />
-                    </td>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1000px] text-sm">
+              <colgroup>
+                <col width={260} />
+                <col width={140} />
+                <col width={140} />
+                <col width={100} />
+                <col width={200} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {["Name", "Current Value", "Target Value", "Unit", "Owner", ""].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="p-3">
-            <Button variant="outline" onClick={() => setFinancialData((prev) => [...prev, ["New Category", "New Item", 0, "Expense", ""]])}>
-              Add Financial Row
-            </Button>
+              </thead>
+              <tbody>
+                {kpis.map((k) => (
+                  <tr key={k.id} className="border-b">
+                    <td className="px-2 py-1">
+                      <input className="w-full border rounded px-2 py-1" value={k.name} onChange={(e) => editKPI(k.id, "name", e.target.value)} />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        className="w-full border rounded px-2 py-1"
+                        value={k.current_value}
+                        onChange={(e) => editKPI(k.id, "current_value", Number(e.target.value))}
+                      />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input
+                        type="number"
+                        className="w-full border rounded px-2 py-1"
+                        value={k.target_value}
+                        onChange={(e) => editKPI(k.id, "target_value", Number(e.target.value))}
+                      />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input className="w-full border rounded px-2 py-1" value={k.unit} onChange={(e) => editKPI(k.id, "unit", e.target.value)} />
+                    </td>
+                    <td className="px-2 py-1">
+                      <input className="w-full border rounded px-2 py-1" value={k.owner} onChange={(e) => editKPI(k.id, "owner", e.target.value)} />
+                    </td>
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteKPI(k.id)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!kpis.length && (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
+                      No KPIs. Click “Add KPI”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
 
-      {activeTab === "glossary" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[900px] text-sm">
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {glossaryHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {glossaryTerms.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t">
-                  {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`}>
-                      <input
-                        className="block w-full min-w-[260px] rounded-md border px-2 py-1 text-sm h-9"
-                        value={cell ?? ""}
-                        onChange={(e) =>
-                          setGlossaryTerms((prev) => {
-                            const copy = prev.map((r) => [...r])
-                            copy[rIdx][cIdx] = e.target.value
-                            return copy
-                          })
-                        }
-                      />
-                    </td>
+      {activeTab === "Financials" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">Financials</div>
+            <Button size="sm" onClick={addFinancial} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Row
+            </Button>
+          </div>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1000px] text-sm">
+              <colgroup>
+                <col width={160} />
+                <col width={300} />
+                <col width={120} />
+                <col width={140} />
+                <col width={280} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {["Category", "Item", "Amount", "Type", "Notes", ""].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="p-3">
-            <Button variant="outline" onClick={() => setGlossaryTerms((prev) => [...prev, ["New Term", "Definition"]])}>
+              </thead>
+              <tbody>
+                {financials.map((r, i) => (
+                  <tr key={i} className="border-b">
+                    {r.map((c: any, j: number) => (
+                      <td key={j} className="px-2 py-1">
+                        {j === 2 ? (
+                          <input
+                            type="number"
+                            className="w-full border rounded px-2 py-1"
+                            value={c ?? 0}
+                            onChange={(e) => editFinancial(i, j, Number(e.target.value))}
+                          />
+                        ) : j === 4 ? (
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={c ?? ""} onChange={(e) => editFinancial(i, j, e.target.value)} />
+                        ) : (
+                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editFinancial(i, j, e.target.value)} />
+                        )}
+                      </td>
+                    ))}
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteFinancial(i)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!financials.length && (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
+                      No financial rows. Click “Add Row”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === "Glossary" && (
+        <div className="space-y-3">
+          <div className="flex justify-between items-center">
+            <div className="font-semibold">Glossary</div>
+            <Button size="sm" onClick={addGlossary} className="gap-2">
+              <Plus className="h-4 w-4" />
               Add Term
             </Button>
           </div>
+          <div className="overflow-auto border rounded-lg">
+            <table className="w-[1000px] text-sm">
+              <colgroup>
+                <col width={260} />
+                <col width={680} />
+                <col width={60} />
+              </colgroup>
+              <thead className="bg-slate-50 text-slate-600">
+                <tr>
+                  {["Term", "Definition", ""].map((h) => (
+                    <th key={h} className="text-left px-2 py-2 border-b">
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {glossary.map((r, i) => (
+                  <tr key={i} className="border-b">
+                    <td className="px-2 py-1">
+                      <input className="w-full border rounded px-2 py-1" value={r?.[0] ?? ""} onChange={(e) => editGlossary(i, 0, e.target.value)} />
+                    </td>
+                    <td className="px-2 py-1">
+                      <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={r?.[1] ?? ""} onChange={(e) => editGlossary(i, 1, e.target.value)} />
+                    </td>
+                    <td className="px-2 py-1">
+                      <Button variant="destructive" size="icon" onClick={() => deleteGlossary(i)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+                {!glossary.length && (
+                  <tr>
+                    <td colSpan={3} className="px-3 py-6 text-center text-slate-500">
+                      No terms. Click “Add Term”.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
-      {activeTab === "config" && (
-        <div className="grid gap-4 rounded-xl border p-4">
-          <div className="text-sm text-muted-foreground">Scenario</div>
-          <div className="flex gap-2">
-            <Button variant={scenario === "50k" ? "default" : "outline"} onClick={() => setScenario("50k")}>
-              50k
-            </Button>
-            <Button variant={scenario === "200k" ? "default" : "outline"} onClick={() => setScenario("200k")}>
-              200k
-            </Button>
+      {activeTab === "Config" && (
+        <div className="space-y-4">
+          <div className="font-semibold">Configuration</div>
+          <div className="grid md:grid-cols-2 gap-4">
+            <div className="border rounded-lg p-4 space-y-3">
+              <div className="text-sm text-slate-600">Scenario settings ({scenario})</div>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="text-sm">
+                  Units/year
+                  <input
+                    type="number"
+                    className="w-full border rounded px-2 py-1 mt-1"
+                    value={scenarioCfg.unitsPerYear}
+                    onChange={(e) =>
+                      setPlan((prev: any) => ({
+                        ...prev,
+                        scenarios: {
+                          ...prev.scenarios,
+                          [scenario]: {
+                            ...prev.scenarios[scenario],
+                            unitsPerYear: Number(e.target.value),
+                          },
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <label className="text-sm">
+                  Hours/day
+                  <input
+                    type="number"
+                    className="w-full border rounded px-2 py-1 mt-1"
+                    value={scenarioCfg.hoursPerDay}
+                    onChange={(e) =>
+                      setPlan((prev: any) => ({
+                        ...prev,
+                        scenarios: {
+                          ...prev.scenarios,
+                          [scenario]: {
+                            ...prev.scenarios[scenario],
+                            hoursPerDay: Number(e.target.value),
+                          },
+                        },
+                      }))
+                    }
+                  />
+                </label>
+                <label className="text-sm">
+                  Shifts
+                  <input
+                    type="number"
+                    className="w-full border rounded px-2 py-1 mt-1"
+                    value={scenarioCfg.shifts}
+                    onChange={(e) =>
+                      setPlan((prev: any) => ({
+                        ...prev,
+                        scenarios: {
+                          ...prev.scenarios,
+                          [scenario]: {
+                            ...prev.scenarios[scenario],
+                            shifts: Number(e.target.value),
+                          },
+                        },
+                      }))
+                    }
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="border rounded-lg p-4">
+              <div className="text-sm text-slate-600 mb-2">Actions</div>
+              <div className="flex gap-2">
+                <Button variant="outline" onClick={saveAll} className="gap-2">
+                  <Save className="h-4 w-4" />
+                  Save now
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    if (confirm("Reset to seed plan? This will overwrite local, unsaved edits.")) {
+                      const p = clone(SEED_PLAN);
+                      setPlan(p);
+                      setProjects([]);
+                      setManufacturing([]);
+                      setResources([]);
+                      setRisks([]);
+                      setMeetings([]);
+                      setKpis([]);
+                      setFinancials([]);
+                      setGlossary([]);
+                    }
+                  }}
+                >
+                  Reset to seed
+                </Button>
+              </div>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <Button onClick={saveProjectDataToDatabase} disabled={saving} className="gap-2">
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {saving ? "Saving…" : "Save to Supabase"}
-            </Button>
-            <Button variant="outline" onClick={loadProjectDataFromDatabase}>
-              Reload from Supabase
-            </Button>
-          </div>
-          <SyncStatusIndicator syncStatus={syncStatus} />
+          {error && <div className="text-red-600 text-sm">Error: {error}</div>}
         </div>
       )}
     </div>
-  )
+  );
 }
-
-export default ScaleUpDashboard
