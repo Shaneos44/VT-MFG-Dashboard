@@ -1,13 +1,12 @@
 "use client"
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import React, { useEffect, useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Loader2, TrendingUp } from "lucide-react"
 import { jsPDF } from "jspdf"
 import { generateWeeklySummary } from "@/lib/utils"
 import { clone, SEED_PLAN } from "@/lib/constants"
 
-// ---------------- Types ----------------
 interface Scenario {
   id: string
   name: string
@@ -48,7 +47,6 @@ interface SyncStatus {
   connectedUsers: number
 }
 
-// ---------------- Small UI helpers ----------------
 function SyncStatusIndicator({ syncStatus }: { syncStatus: SyncStatus }) {
   return (
     <div className="flex items-center gap-2 text-sm">
@@ -62,30 +60,18 @@ function SyncStatusIndicator({ syncStatus }: { syncStatus: SyncStatus }) {
   )
 }
 
-// --------------- Component ----------------
 const ScaleUpDashboard: React.FC = () => {
-  // ----------- Core state -----------
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const [activeTab, setActiveTab] = useState<
-    | "overview"
-    | "projects"
-    | "manufacturing"
-    | "resources"
-    | "risks"
-    | "meetings"
-    | "kpis"
-    | "financials"
-    | "glossary"
-    | "config"
+    "overview" | "projects" | "manufacturing" | "resources" | "risks" | "meetings" | "kpis" | "financials" | "glossary" | "config"
   >("projects")
 
   const [scenario, setScenario] = useState<"50k" | "200k">("50k")
   const [variant, setVariant] = useState<Variant>("Recess Nanodispensing")
 
-  // Plan is your big structure from SEED_PLAN
   const [plan, setPlan] = useState(() => {
     const initial = clone(SEED_PLAN)
     if (!initial.scenarios) {
@@ -98,7 +84,7 @@ const ScaleUpDashboard: React.FC = () => {
   })
 
   const [currentScenario, setCurrentScenario] = useState<Scenario | null>(null)
-  const [scenarios, setScenarios] = useState<Scenario[]>([])
+  const [_scenarios, _setScenarios] = useState<Scenario[]>([])
   const [costData, setCostData] = useState<CostData[]>([])
 
   const [kpis, setKpis] = useState<KPI[]>([
@@ -157,7 +143,6 @@ const ScaleUpDashboard: React.FC = () => {
     connectedUsers: 1,
   })
 
-  // ----------- Default tables for secondary tabs -----------
   const [manufacturingProcesses, setManufacturingProcesses] = useState<any[][]>([
     ["Receive Needles", 0, 1, 100, 0, "Manual Station", "Manual", "Validated", "Operator1"],
     ["Mount Needles to VS & Run Inspection", 2, 1, 98, 120, "Vision System", "Semi-Auto", "Validated", "Operator1"],
@@ -218,7 +203,6 @@ const ScaleUpDashboard: React.FC = () => {
     ["Dipcoating", "Controlled immersion coating process"],
   ])
 
-  // ----------- Headers & widths -----------
   const projectsHeaders = [
     "id",
     "name",
@@ -246,33 +230,35 @@ const ScaleUpDashboard: React.FC = () => {
     "slack_days",
   ]
 
-  // Wider, readable defaults for project columns
+  // Wider long-text columns + narrow centered R/A/C/I
   const projectsWidths = [
-    120, // id
-    260, // name
-    140, // type
-    120, // moscow
-    160, // owner
+    140, // id
+    320, // name
+    160, // type
+    140, // moscow
+    170, // owner
     150, // start
     150, // finish
     140, // dependencies
-    320, // deliverables (long text)
-    320, // goal (long text)
-    100, // R
-    100, // A
-    100, // C
-    100, // I
-    300, // needs (long text)
-    300, // barriers (long text)
-    300, // risks (long text)
-    140, // budget_capex
-    140, // budget_opex
-    140, // percent_complete
-    160, // process_link
+    440, // deliverables
+    440, // goal
+    80,  // R
+    80,  // A
+    80,  // C
+    80,  // I
+    400, // needs
+    400, // barriers
+    400, // risks
+    160, // budget_capex
+    160, // budget_opex
+    160, // percent_complete
+    200, // process_link
     120, // critical
-    140, // status
-    120, // slack_days
+    150, // status
+    130, // slack_days
   ]
+
+  const projectsTableMinW = useMemo(() => projectsWidths.reduce((a, b) => a + b, 0) + 60, [projectsWidths])
 
   const manufacturingHeaders = [
     "Process",
@@ -291,7 +277,6 @@ const ScaleUpDashboard: React.FC = () => {
   const financialHeaders = ["Category", "Item", "Amount", "Type", "Notes"]
   const glossaryHeaders = ["Term", "Definition"]
 
-  // ----------- Helpers -----------
   const ensureArray = (v: any): any[] => {
     if (Array.isArray(v)) return v
     if (v && typeof v === "object" && Array.isArray((v as any).rows)) return (v as any).rows
@@ -299,7 +284,6 @@ const ScaleUpDashboard: React.FC = () => {
     return [v]
   }
 
-  // Pull the product data for current scenario from plan
   const currentVariantData = useMemo(() => {
     const base =
       (plan.products && plan.products[scenario]) || {
@@ -321,8 +305,7 @@ const ScaleUpDashboard: React.FC = () => {
           twoHundredK: new Date().toISOString(),
         },
       }
-
-    const enriched = {
+    return {
       ...base,
       projects: ensureArray(base.projects),
       manufacturing: ensureArray(base.manufacturing),
@@ -330,11 +313,8 @@ const ScaleUpDashboard: React.FC = () => {
       risks: ensureArray(base.risks),
       meetings: ensureArray(base.meetings),
     }
-
-    return enriched
   }, [plan, scenario])
 
-  // Convert project objects to arrays matching headers (if needed)
   const projectRows = useMemo(() => {
     const rows = ensureArray(currentVariantData.projects).map((p: any, idx: number) => {
       if (Array.isArray(p)) return p
@@ -396,7 +376,6 @@ const ScaleUpDashboard: React.FC = () => {
     return rows
   }, [currentVariantData.projects])
 
-  // ----------- Handlers: projects/manufacturing/resources/risks/meetings/KPIs -----------
   const handleProjectCellChange = (rowIndex: number, colIndex: number, value: any) => {
     const updated = projectRows.map((r) => [...r])
     if (updated[rowIndex]) updated[rowIndex][colIndex] = value
@@ -413,105 +392,6 @@ const ScaleUpDashboard: React.FC = () => {
     setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
   }
 
-  const handleManufacturingCellChangeFunc = (rowIndex: number, colIndex: number, value: any) => {
-    setManufacturingProcesses((prev) => {
-      const copy = prev.map((r) => [...r])
-      if (copy[rowIndex]) copy[rowIndex][colIndex] = value
-      return copy
-    })
-  }
-
-  const handleResourceCellChangeFunc = (rowIndex: number, colIndex: number, value: any) => {
-    setResourcesData((prev) => {
-      const copy = prev.map((r) => [...r])
-      if (copy[rowIndex]) copy[rowIndex][colIndex] = value
-      return copy
-    })
-  }
-
-  const handleRiskCellChangeFunc = (rowIndex: number, colIndex: number, value: any) => {
-    setRisksData((prev) => {
-      const copy = prev.map((r) => [...r])
-      if (copy[rowIndex]) copy[rowIndex][colIndex] = value
-      return copy
-    })
-  }
-
-  const handleMeetingCellChangeFunc = (rowIndex: number, colIndex: number, value: any) => {
-    setMeetingsData((prev) => {
-      const copy = prev.map((r) => [...r])
-      if (copy[rowIndex]) copy[rowIndex][colIndex] = value
-      return copy
-    })
-  }
-
-  const handleKpiCellChange = (rowIndex: number, colIndex: number, value: any) => {
-    setKpis((prev) => {
-      const copy = prev.map((k) => ({ ...k }))
-      const mapIdxToField: Record<number, keyof KPI | "current_value" | "target_value" | "unit" | "owner" | "name"> = {
-        0: "name",
-        1: "current_value",
-        2: "target_value",
-        3: "unit",
-        4: "owner",
-      }
-      const field = mapIdxToField[colIndex]
-      if (copy[rowIndex] && field) {
-        const v =
-          field === "current_value" || field === "target_value"
-            ? Number.isFinite(parseFloat(String(value)))
-              ? parseFloat(String(value))
-              : 0
-            : value
-        ;(copy[rowIndex] as any)[field] = v
-        copy[rowIndex].updated_at = new Date().toISOString()
-      }
-      return copy
-    })
-  }
-
-  const addNewMeetingFunc = () => {
-    setMeetingsData((prev) => [
-      ...prev,
-      ["New Meeting", new Date().toISOString().slice(0, 10), "10:00", "60 min", "Team", "Location", "Scheduled"],
-    ])
-  }
-
-  const addNewKPI = () => {
-    const now = Date.now()
-    setKpis((prev) => [
-      ...prev,
-      {
-        id: `kpi-${now}`,
-        scenario_id: `scenario-${scenario}`,
-        name: "New KPI",
-        target_value: 100,
-        current_value: 0,
-        unit: "%",
-        owner: "Owner",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-    ])
-  }
-
-  const deleteKPI = (kpiId: string) => {
-    setKpis((prev) => prev.filter((k) => k.id !== kpiId))
-  }
-
-  const startEditingKPI = (_kpi: KPI) => {
-    // You can wire a modal here if needed; for now inline editing is supported by the table.
-  }
-
-  const addNewFinancialItemFunc = () => {
-    setFinancialData((prev) => [...prev, ["New Category", "New Item", 0, "Expense", ""]])
-  }
-
-  const addNewGlossaryTermFunc = () => {
-    setGlossaryTerms((prev) => [...prev, ["New Term", "Definition"]])
-  }
-
-  // ----------- Overview metrics -----------
   const overviewMetrics = useMemo(() => {
     const scenarioData =
       plan.scenarios && plan.scenarios[scenario]
@@ -544,20 +424,11 @@ const ScaleUpDashboard: React.FC = () => {
     }
   }, [plan, scenario, projectRows.length, risksData.length, costData, currentScenario])
 
-  // ----------- Supabase save / load via /api/configurations -----------
   const saveProjectDataToDatabase = async () => {
     try {
       setSaving(true)
       setError(null)
-
-      const projectData = {
-        plan,
-        scenario,
-        variant,
-        currentVariantData,
-        lastSaved: new Date().toISOString(),
-      }
-
+      const projectData = { plan, scenario, variant, currentVariantData, lastSaved: new Date().toISOString() }
       const res = await fetch("/api/configurations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -569,12 +440,10 @@ const ScaleUpDashboard: React.FC = () => {
           upsert: true,
         }),
       })
-
       if (!res.ok) {
         const j = await res.json().catch(() => ({}))
         throw new Error(j?.error || `Save failed with status ${res.status}`)
       }
-
       setSyncStatus((s) => ({ ...s, pendingChanges: 0, lastSync: new Date(), isOnline: true }))
     } catch (e: any) {
       setError(e?.message || "Failed to save data.")
@@ -588,20 +457,17 @@ const ScaleUpDashboard: React.FC = () => {
     try {
       setLoading(true)
       setError(null)
-
       const res = await fetch("/api/configurations")
       if (!res.ok) {
         const j = await res.json().catch(() => ({}))
         throw new Error(j?.error || `Load failed with status ${res.status}`)
       }
       const configs = await res.json()
-
-      let latest = Array.isArray(configs)
-        ? configs.find((c: any) => c.name === "ScaleUp-Dashboard-Config") ||
-          configs.sort(
-            (a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-          )[0]
-        : null
+      let latest =
+        Array.isArray(configs)
+          ? configs.find((c: any) => c.name === "ScaleUp-Dashboard-Config") ||
+            configs.sort((a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0]
+          : null
 
       if (latest && latest.data) {
         const { plan: loadedPlan, scenario: loadedScenario, variant: loadedVariant } = latest.data
@@ -617,14 +483,11 @@ const ScaleUpDashboard: React.FC = () => {
   }
 
   useEffect(() => {
-    // Initial load
     loadProjectDataFromDatabase().finally(() => setLoading(false))
   }, [])
 
-  // ----------- Exports -----------
   const exportWeeklySummary = () => {
     const summary = generateWeeklySummary()
-
     const reportContent = `
 WEEKLY PROJECT SUMMARY - ${summary.week}
 VitalTrace Manufacturing Scale-Up Dashboard
@@ -646,12 +509,7 @@ ${summary.criticalIssues.length > 0 ? summary.criticalIssues.map((i: string) => 
 
 📈 KPI PERFORMANCE SUMMARY
 ${summary.kpiSummary
-  .map(
-    (k: any) =>
-      `• ${k.name}: ${k.current}/${k.target} ${
-        k.trend === "up" ? "↗️" : k.trend === "down" ? "↘️" : "→"
-      }`,
-  )
+  .map((k: any) => `• ${k.name}: ${k.current}/${k.target} ${k.trend === "up" ? "↗️" : k.trend === "down" ? "↘️" : "→"}`)
   .join("\n")}
 
 🚀 NEXT WEEK PRIORITIES
@@ -679,58 +537,107 @@ Dashboard Version: v64
     URL.revokeObjectURL(url)
   }
 
+  // PDF generator with extra spacing and strict page breaks
   const generateComprehensiveReportPDF = async () => {
-    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" })
+    const PAGE_W = 595
+    const PAGE_H = 842
+    const M = 40
+    const LINE = 16
+    const GAP = 10
 
-    const wk = new Date().toLocaleDateString()
-    const scen = scenario
-    const vari = variant
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" })
+    let y = M
+
+    const ensureSpace = (needed: number) => {
+      if (y + needed > PAGE_H - M) {
+        doc.addPage()
+        y = M
+      }
+    }
+
+    const header = () => {
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(16)
+      doc.text("VitalTrace – Comprehensive Scale-Up Report", M, y)
+      y += 22
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(11)
+      doc.text(`Generated: ${new Date().toLocaleString()}`, M, y)
+      y += 16
+      doc.text(`Scenario: ${scenario}  •  Variant: ${variant}`, M, y)
+      y += 16
+      doc.setDrawColor(200, 200, 200)
+      doc.line(M, y, PAGE_W - M, y)
+      y += 14
+    }
+
+    const title = (t: string) => {
+      ensureSpace(28)
+      doc.setFont("helvetica", "bold")
+      doc.setFontSize(13)
+      doc.text(t, M, y)
+      y += 18
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(10)
+    }
+
+    const bullets = (arr: string[]) => {
+      const maxW = PAGE_W - 2 * M
+      arr.forEach((s) => {
+        const lines = doc.splitTextToSize(s, maxW)
+        lines.forEach((ln) => {
+          ensureSpace(LINE)
+          doc.text(ln, M, y)
+          y += LINE
+        })
+      })
+      y += GAP
+    }
 
     const projects = ensureArray(currentVariantData.projects).map((r: any[]) => ({
-      id: r?.[0],
-      name: r?.[1],
-      phase: r?.[2],
-      priority: r?.[3],
-      owner: r?.[4],
-      start: r?.[5],
-      end: r?.[6],
-      deliverables: r?.[8],
-      goal: r?.[9],
+      id: r?.[0] ?? "",
+      name: r?.[1] ?? "",
+      phase: r?.[2] ?? "",
+      priority: r?.[3] ?? "",
+      owner: r?.[4] ?? "",
+      start: r?.[5] ?? "",
+      end: r?.[6] ?? "",
+      deliverables: r?.[8] ?? "",
+      goal: r?.[9] ?? "",
       capex: r?.[17] ?? 0,
       opex: r?.[18] ?? 0,
       percent: r?.[19] ?? 0,
-      status: r?.[22],
+      status: r?.[22] ?? "",
     }))
 
     const resources = ensureArray(currentVariantData.resources).map((r: any[]) => ({
-      role: r?.[0],
-      type: r?.[1],
-      qty: r?.[2],
-      cost: r?.[3],
-      dept: r?.[4],
-      notes: r?.[5],
+      role: r?.[0] ?? "",
+      type: r?.[1] ?? "",
+      qty: r?.[2] ?? 0,
+      cost: r?.[3] ?? 0,
+      dept: r?.[4] ?? "",
+      notes: r?.[5] ?? "",
     }))
 
     const risks = ensureArray(currentVariantData.risks).map((r: any[]) => ({
-      id: r?.[0],
-      risk: r?.[1],
-      impact: r?.[2],
-      prob: r?.[3],
-      mitigation: r?.[4],
-      owner: r?.[5],
-      due: r?.[6],
-      status: r?.[7],
+      id: r?.[0] ?? "",
+      risk: r?.[1] ?? "",
+      impact: r?.[2] ?? "",
+      prob: r?.[3] ?? "",
+      mitigation: r?.[4] ?? "",
+      owner: r?.[5] ?? "",
+      due: r?.[6] ?? "",
+      status: r?.[7] ?? "",
     }))
 
     const meetings = ensureArray(currentVariantData.meetings).map((m: any[]) => ({
-      title: m?.[0] ?? m?.[1],
-      date: m?.[1] ?? m?.[2],
+      title: m?.[0] ?? m?.[1] ?? "",
+      date: m?.[1] ?? m?.[2] ?? "",
       time: m?.[2] ?? "—",
       duration: m?.[3] ?? "—",
       attendees: m?.[4] ?? "—",
       location: m?.[5] ?? "—",
       status: m?.[6] ?? "—",
-      notes: "",
     }))
 
     const kpiRows = ensureArray(kpis).map((k: KPI) => ({
@@ -741,106 +648,59 @@ Dashboard Version: v64
       owner: k.owner,
     }))
 
-    doc.setFont("helvetica", "bold")
-    doc.setFontSize(16)
-    doc.text(`VitalTrace – Comprehensive Scale-Up Report`, 40, 50)
-    doc.setFont("helvetica", "normal")
-    doc.setFontSize(11)
-    doc.text(`Week: ${wk}`, 40, 72)
-    doc.text(`Scenario: ${scen}  |  Variant: ${vari}`, 40, 90)
+    header()
 
-    const writeSection = (title: string, lines: string[]) => {
-      let y = (doc as any)._y || 110
-      const left = 40
-      const rightMargin = 40
-      const maxWidth = 595 - left - rightMargin
-
-      doc.setFont("helvetica", "bold")
-      doc.setFontSize(13)
-      if (y > 760) {
-        doc.addPage()
-        y = 60
-      }
-      doc.text(title, left, y)
-      y += 16
-
-      doc.setFont("helvetica", "normal")
-      doc.setFontSize(10)
-      lines.forEach((ln) => {
-        const split = doc.splitTextToSize(ln, maxWidth)
-        split.forEach((s) => {
-          if (y > 780) {
-            doc.addPage()
-            y = 60
-          }
-          doc.text(s, left, y)
-          y += 14
-        })
-      })
-
-      ;(doc as any)._y = y + 10
-    }
-
-    writeSection(
-      "Projects",
+    title("Projects")
+    bullets(
       projects.length
         ? projects.map(
             (p) =>
-              `• [${p.status ?? "-"}] ${p.name} (${p.phase}, ${p.priority}) — Owner: ${p.owner} — ${p.start} → ${
-                p.end
-              } — CapEx $${p.capex} / OpEx $${p.opex} — ${p.percent}%`,
+              `• [${p.status}] ${p.name} (${p.phase}, ${p.priority}) — Owner: ${p.owner} — ${p.start} → ${p.end} — CapEx $${p.capex} / OpEx $${p.opex} — ${p.percent}%`,
           )
         : ["• No projects found."],
     )
 
-    writeSection(
-      "Resources",
+    title("Resources")
+    bullets(
       resources.length
-        ? resources.map((r) => `• ${r.role} — ${r.type} — Qty: ${r.qty ?? 0} — $${r.cost ?? 0} — ${r.dept ?? ""}`)
+        ? resources.map((r) => `• ${r.role} — ${r.type} — Qty ${r.qty} — $${r.cost} — ${r.dept}`)
         : ["• No resources found."],
     )
 
-    writeSection(
-      "Risks",
+    title("Risks")
+    bullets(
       risks.length
         ? risks.map(
             (r) =>
-              `• (${r.id}) ${r.risk} — Impact ${r.impact}, Prob ${r.prob} — Mitigation: ${r.mitigation} — Owner: ${r.owner} — Due: ${r.due} — ${r.status ?? ""}`,
+              `• (${r.id}) ${r.risk} — Impact ${r.impact}, Prob ${r.prob} — Mitigation: ${r.mitigation} — Owner: ${r.owner} — Due: ${r.due} — ${r.status}`,
           )
         : ["• No risks found."],
     )
 
-    writeSection(
-      "Meetings",
+    title("Meetings")
+    bullets(
       meetings.length
-        ? meetings.map(
-            (m) =>
-              `• ${m.title} — ${m.date} ${m.time} — ${m.attendees} — ${m.duration} — ${m.status} — ${m.location}`,
-          )
+        ? meetings.map((m) => `• ${m.title} — ${m.date} ${m.time} — ${m.attendees} — ${m.duration} — ${m.status} — ${m.location}`)
         : ["• No meetings found."],
     )
 
-    writeSection(
-      "KPIs",
+    title("KPIs")
+    bullets(
       kpiRows.length
         ? kpiRows.map((k) => `• ${k.name}: ${k.current}${k.unit} / ${k.target}${k.unit} — Owner: ${k.owner}`)
         : ["• No KPIs defined."],
     )
 
-    let y = (doc as any)._y || 760
-    if (y > 760) {
-      doc.addPage()
-      y = 60
-    }
+    ensureSpace(30)
     doc.setDrawColor(200, 200, 200)
-    doc.line(40, y, 555, y)
+    doc.line(M, y, PAGE_W - M, y)
+    y += 14
     doc.setFontSize(9)
-    doc.text(`Generated ${new Date().toLocaleString()} • Scenario ${scen} • Variant ${vari}`, 40, y + 14)
+    doc.text(`End of report • Scenario ${scenario} • Variant ${variant}`, M, y)
 
-    doc.save(`VitalTrace_Comprehensive_Report_${vari}_${scen}.pdf`)
+    doc.save(`VitalTrace_Comprehensive_Report_${variant}_${scenario}.pdf`)
   }
 
-  // ----------- Loading/Error states -----------
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -875,7 +735,6 @@ Dashboard Version: v64
     )
   }
 
-  // ----------- UI -----------
   return (
     <div className="p-4 space-y-6">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
@@ -886,10 +745,7 @@ Dashboard Version: v64
           <Button variant={activeTab === "projects" ? "default" : "outline"} onClick={() => setActiveTab("projects")}>
             Projects
           </Button>
-          <Button
-            variant={activeTab === "manufacturing" ? "default" : "outline"}
-            onClick={() => setActiveTab("manufacturing")}
-          >
+          <Button variant={activeTab === "manufacturing" ? "default" : "outline"} onClick={() => setActiveTab("manufacturing")}>
             Manufacturing
           </Button>
           <Button variant={activeTab === "resources" ? "default" : "outline"} onClick={() => setActiveTab("resources")}>
@@ -904,10 +760,7 @@ Dashboard Version: v64
           <Button variant={activeTab === "kpis" ? "default" : "outline"} onClick={() => setActiveTab("kpis")}>
             KPIs
           </Button>
-          <Button
-            variant={activeTab === "financials" ? "default" : "outline"}
-            onClick={() => setActiveTab("financials")}
-          >
+          <Button variant={activeTab === "financials" ? "default" : "outline"} onClick={() => setActiveTab("financials")}>
             Financials
           </Button>
           <Button variant={activeTab === "glossary" ? "default" : "outline"} onClick={() => setActiveTab("glossary")}>
@@ -927,7 +780,6 @@ Dashboard Version: v64
         </div>
       </div>
 
-      {/* OVERVIEW */}
       {activeTab === "overview" && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
           <div className="rounded-xl border p-4 bg-card">
@@ -937,12 +789,9 @@ Dashboard Version: v64
           </div>
           <div className="rounded-xl border p-4 bg-card">
             <div className="text-sm text-muted-foreground">Financials</div>
-            <div className="text-2xl font-semibold">
-              ${(overviewMetrics.annualRevenue / 1_000_000).toFixed(1)}M revenue
-            </div>
+            <div className="text-2xl font-semibold">${(overviewMetrics.annualRevenue / 1_000_000).toFixed(1)}M revenue</div>
             <div className="text-xs mt-1">
-              Profit margin: {overviewMetrics.profitMargin}% • CPU $
-              {Number(overviewMetrics.costPerUnit).toFixed(2)}
+              Profit margin: {overviewMetrics.profitMargin}% • CPU ${Number(overviewMetrics.costPerUnit).toFixed(2)}
             </div>
           </div>
           <div className="rounded-xl border p-4 bg-card">
@@ -955,39 +804,38 @@ Dashboard Version: v64
         </div>
       )}
 
-      {/* PROJECTS */}
       {activeTab === "projects" && (
         <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[2600px] text-sm">
+          <table className="table-fixed w-full text-sm" style={{ minWidth: `${projectsTableMinW}px` }}>
+            <colgroup>
+              {projectsWidths.map((w, i) => (
+                <col key={`col-${i}`} style={{ width: `${w}px` }} />
+              ))}
+            </colgroup>
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {projectsHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">
-                    {h}
-                  </th>
+                {projectsHeaders.map((h, idx) => (
+                  <th key={h} className={`whitespace-nowrap ${idx >= 10 && idx <= 13 ? "text-center" : ""}`}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
               {projectRows.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t">
+                <tr key={rIdx} className="border-t align-top">
                   {row.map((cell: any, cIdx: number) => {
-                    const w = projectsWidths[cIdx] ?? 160
-                    const isLongText = [8, 9, 14, 15, 16].includes(cIdx) // deliverables, goal, needs, barriers, risks
+                    const isLongText = [8, 9, 14, 15, 16].includes(cIdx)
+                    const isRACI = cIdx >= 10 && cIdx <= 13
                     return (
-                      <td key={`${rIdx}-${cIdx}`} className="whitespace-normal break-words align-top">
+                      <td key={`${rIdx}-${cIdx}`} className={`align-top ${isRACI ? "text-center" : ""}`}>
                         {isLongText ? (
                           <textarea
-                            className="w-full rounded-md border px-2 py-1 text-sm"
-                            style={{ minWidth: w, width: w + 60 }}
-                            rows={3}
+                            className="block w-full rounded-md border px-2 py-1 text-sm resize-none whitespace-pre-wrap break-words leading-snug min-h-[84px]"
                             value={cell ?? ""}
                             onChange={(e) => handleProjectCellChange(rIdx, cIdx, e.target.value)}
                           />
                         ) : (
                           <input
-                            className="w-full rounded-md border px-2 py-1 text-sm"
-                            style={{ minWidth: w, width: w + 40 }}
+                            className={`block w-full rounded-md border px-2 py-1 text-sm leading-tight h-9 ${isRACI ? "text-center" : ""}`}
                             value={cell ?? ""}
                             onChange={(e) => handleProjectCellChange(rIdx, cIdx, e.target.value)}
                           />
@@ -1002,16 +850,13 @@ Dashboard Version: v64
         </div>
       )}
 
-      {/* MANUFACTURING */}
       {activeTab === "manufacturing" && (
         <div className="overflow-x-auto rounded-xl border">
           <table className="table-fixed w-full min-w-[1400px] text-sm">
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
                 {manufacturingHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">
-                    {h}
-                  </th>
+                  <th key={h} className="whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1019,11 +864,17 @@ Dashboard Version: v64
               {manufacturingProcesses.map((row, rIdx) => (
                 <tr key={rIdx} className="border-t">
                   {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`} className="whitespace-normal break-words">
+                    <td key={`${rIdx}-${cIdx}`}>
                       <input
-                        className="w-full min-w-[140px] rounded-md border px-2 py-1 text-sm"
+                        className="block w-full min-w-[140px] rounded-md border px-2 py-1 text-sm h-9"
                         value={cell ?? ""}
-                        onChange={(e) => handleManufacturingCellChangeFunc(rIdx, cIdx, e.target.value)}
+                        onChange={(e) =>
+                          setManufacturingProcesses((prev) => {
+                            const copy = prev.map((r) => [...r])
+                            copy[rIdx][cIdx] = e.target.value
+                            return copy
+                          })
+                        }
                       />
                     </td>
                   ))}
@@ -1047,16 +898,13 @@ Dashboard Version: v64
         </div>
       )}
 
-      {/* RESOURCES */}
       {activeTab === "resources" && (
         <div className="overflow-x-auto rounded-xl border">
           <table className="table-fixed w-full min-w-[1100px] text-sm">
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
                 {resourcesHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">
-                    {h}
-                  </th>
+                  <th key={h} className="whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1064,11 +912,17 @@ Dashboard Version: v64
               {resourcesData.map((row, rIdx) => (
                 <tr key={rIdx} className="border-t">
                   {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`} className="whitespace-normal break-words">
+                    <td key={`${rIdx}-${cIdx}`}>
                       <input
-                        className="w-full min-w-[160px] rounded-md border px-2 py-1 text-sm"
+                        className="block w-full min-w-[160px] rounded-md border px-2 py-1 text-sm h-9"
                         value={cell ?? ""}
-                        onChange={(e) => handleResourceCellChangeFunc(rIdx, cIdx, e.target.value)}
+                        onChange={(e) =>
+                          setResourcesData((prev) => {
+                            const copy = prev.map((r) => [...r])
+                            copy[rIdx][cIdx] = e.target.value
+                            return copy
+                          })
+                        }
                       />
                     </td>
                   ))}
@@ -1079,16 +933,13 @@ Dashboard Version: v64
         </div>
       )}
 
-      {/* RISKS */}
       {activeTab === "risks" && (
         <div className="overflow-x-auto rounded-xl border">
           <table className="table-fixed w-full min-w-[1200px] text-sm">
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
                 {risksHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">
-                    {h}
-                  </th>
+                  <th key={h} className="whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1096,11 +947,17 @@ Dashboard Version: v64
               {risksData.map((row, rIdx) => (
                 <tr key={rIdx} className="border-t">
                   {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`} className="whitespace-normal break-words">
+                    <td key={`${rIdx}-${cIdx}`}>
                       <input
-                        className="w-full min-w-[160px] rounded-md border px-2 py-1 text-sm"
+                        className="block w-full min-w-[160px] rounded-md border px-2 py-1 text-sm h-9"
                         value={cell ?? ""}
-                        onChange={(e) => handleRiskCellChangeFunc(rIdx, cIdx, e.target.value)}
+                        onChange={(e) =>
+                          setRisksData((prev) => {
+                            const copy = prev.map((r) => [...r])
+                            copy[rIdx][cIdx] = e.target.value
+                            return copy
+                          })
+                        }
                       />
                     </td>
                   ))}
@@ -1111,16 +968,13 @@ Dashboard Version: v64
         </div>
       )}
 
-      {/* MEETINGS */}
       {activeTab === "meetings" && (
         <div className="overflow-x-auto rounded-xl border">
           <table className="table-fixed w-full min-w-[1200px] text-sm">
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
                 {meetingsHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">
-                    {h}
-                  </th>
+                  <th key={h} className="whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1128,11 +982,17 @@ Dashboard Version: v64
               {meetingsData.map((row, rIdx) => (
                 <tr key={rIdx} className="border-t">
                   {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`} className="whitespace-normal break-words">
+                    <td key={`${rIdx}-${cIdx}`}>
                       <input
-                        className="w-full min-w-[180px] rounded-md border px-2 py-1 text-sm"
+                        className="block w-full min-w-[180px] rounded-md border px-2 py-1 text-sm h-9"
                         value={cell ?? ""}
-                        onChange={(e) => handleMeetingCellChangeFunc(rIdx, cIdx, e.target.value)}
+                        onChange={(e) =>
+                          setMeetingsData((prev) => {
+                            const copy = prev.map((r) => [...r])
+                            copy[rIdx][cIdx] = e.target.value
+                            return copy
+                          })
+                        }
                       />
                     </td>
                   ))}
@@ -1141,14 +1001,21 @@ Dashboard Version: v64
             </tbody>
           </table>
           <div className="p-3">
-            <Button variant="outline" onClick={addNewMeetingFunc}>
+            <Button
+              variant="outline"
+              onClick={() =>
+                setMeetingsData((prev) => [
+                  ...prev,
+                  ["New Meeting", new Date().toISOString().slice(0, 10), "10:00", "60 min", "Team", "Location", "Scheduled"],
+                ])
+              }
+            >
               Add Meeting
             </Button>
           </div>
         </div>
       )}
 
-      {/* KPIs */}
       {activeTab === "kpis" && (
         <div className="overflow-x-auto rounded-xl border">
           <table className="table-fixed w-full min-w-[900px] text-sm">
@@ -1167,45 +1034,77 @@ Dashboard Version: v64
                 <tr key={kpi.id} className="border-t">
                   <td>
                     <input
-                      className="w-full min-w-[220px] rounded-md border px-2 py-1 text-sm"
+                      className="block w-full min-w-[220px] rounded-md border px-2 py-1 text-sm h-9"
                       value={kpi.name}
-                      onChange={(e) => handleKpiCellChange(rIdx, 0, e.target.value)}
+                      onChange={(e) =>
+                        setKpis((prev) => {
+                          const copy = prev.map((k) => ({ ...k }))
+                          copy[rIdx].name = e.target.value
+                          copy[rIdx].updated_at = new Date().toISOString()
+                          return copy
+                        })
+                      }
                     />
                   </td>
                   <td>
                     <input
-                      className="w-full min-w-[120px] rounded-md border px-2 py-1 text-sm"
+                      className="block w-full min-w-[120px] rounded-md border px-2 py-1 text-sm h-9"
                       value={kpi.current_value}
-                      onChange={(e) => handleKpiCellChange(rIdx, 1, e.target.value)}
+                      onChange={(e) =>
+                        setKpis((prev) => {
+                          const copy = prev.map((k) => ({ ...k }))
+                          copy[rIdx].current_value = parseFloat(e.target.value) || 0
+                          copy[rIdx].updated_at = new Date().toISOString()
+                          return copy
+                        })
+                      }
                     />
                   </td>
                   <td>
                     <input
-                      className="w-full min-w-[120px] rounded-md border px-2 py-1 text-sm"
+                      className="block w-full min-w-[120px] rounded-md border px-2 py-1 text-sm h-9"
                       value={kpi.target_value}
-                      onChange={(e) => handleKpiCellChange(rIdx, 2, e.target.value)}
+                      onChange={(e) =>
+                        setKpis((prev) => {
+                          const copy = prev.map((k) => ({ ...k }))
+                          copy[rIdx].target_value = parseFloat(e.target.value) || 0
+                          copy[rIdx].updated_at = new Date().toISOString()
+                          return copy
+                        })
+                      }
                     />
                   </td>
                   <td>
                     <input
-                      className="w-full min-w-[100px] rounded-md border px-2 py-1 text-sm"
+                      className="block w-full min-w-[100px] rounded-md border px-2 py-1 text-sm h-9"
                       value={kpi.unit}
-                      onChange={(e) => handleKpiCellChange(rIdx, 3, e.target.value)}
+                      onChange={(e) =>
+                        setKpis((prev) => {
+                          const copy = prev.map((k) => ({ ...k }))
+                          copy[rIdx].unit = e.target.value
+                          copy[rIdx].updated_at = new Date().toISOString()
+                          return copy
+                        })
+                      }
                     />
                   </td>
                   <td>
                     <input
-                      className="w-full min-w-[180px] rounded-md border px-2 py-1 text-sm"
+                      className="block w-full min-w-[180px] rounded-md border px-2 py-1 text-sm h-9"
                       value={kpi.owner}
-                      onChange={(e) => handleKpiCellChange(rIdx, 4, e.target.value)}
+                      onChange={(e) =>
+                        setKpis((prev) => {
+                          const copy = prev.map((k) => ({ ...k }))
+                          copy[rIdx].owner = e.target.value
+                          copy[rIdx].updated_at = new Date().toISOString()
+                          return copy
+                        })
+                      }
                     />
                   </td>
                   <td className="w-[1%] whitespace-nowrap">
                     <div className="flex gap-2">
-                      <Button size="sm" variant="outline" onClick={() => startEditingKPI(kpis[rIdx])}>
-                        Edit
-                      </Button>
-                      <Button size="sm" variant="destructive" onClick={() => deleteKPI(kpi.id)}>
+                      <Button size="sm" variant="destructive" onClick={() => setKpis((prev) => prev.filter((k) => k.id !== kpi.id))}>
                         Delete
                       </Button>
                     </div>
@@ -1215,23 +1114,38 @@ Dashboard Version: v64
             </tbody>
           </table>
           <div className="p-3">
-            <Button variant="outline" onClick={addNewKPI}>
+            <Button
+              variant="outline"
+              onClick={() =>
+                setKpis((prev) => [
+                  ...prev,
+                  {
+                    id: `kpi-${Date.now()}`,
+                    scenario_id: `scenario-${scenario}`,
+                    name: "New KPI",
+                    target_value: 100,
+                    current_value: 0,
+                    unit: "%",
+                    owner: "Owner",
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                  },
+                ])
+              }
+            >
               Add KPI
             </Button>
           </div>
         </div>
       )}
 
-      {/* FINANCIALS */}
       {activeTab === "financials" && (
         <div className="overflow-x-auto rounded-xl border">
           <table className="table-fixed w-full min-w-[1200px] text-sm">
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
                 {financialHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">
-                    {h}
-                  </th>
+                  <th key={h} className="whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1239,9 +1153,9 @@ Dashboard Version: v64
               {financialData.map((row, rIdx) => (
                 <tr key={rIdx} className="border-t">
                   {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`} className="whitespace-normal break-words">
+                    <td key={`${rIdx}-${cIdx}`}>
                       <input
-                        className="w-full min-w-[180px] rounded-md border px-2 py-1 text-sm"
+                        className="block w-full min-w-[180px] rounded-md border px-2 py-1 text-sm h-9"
                         value={cell ?? ""}
                         onChange={(e) =>
                           setFinancialData((prev) => {
@@ -1258,23 +1172,20 @@ Dashboard Version: v64
             </tbody>
           </table>
           <div className="p-3">
-            <Button variant="outline" onClick={addNewFinancialItemFunc}>
+            <Button variant="outline" onClick={() => setFinancialData((prev) => [...prev, ["New Category", "New Item", 0, "Expense", ""]])}>
               Add Financial Row
             </Button>
           </div>
         </div>
       )}
 
-      {/* GLOSSARY */}
       {activeTab === "glossary" && (
         <div className="overflow-x-auto rounded-xl border">
           <table className="table-fixed w-full min-w-[900px] text-sm">
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
                 {glossaryHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">
-                    {h}
-                  </th>
+                  <th key={h} className="whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
@@ -1282,9 +1193,9 @@ Dashboard Version: v64
               {glossaryTerms.map((row, rIdx) => (
                 <tr key={rIdx} className="border-t">
                   {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`} className="whitespace-normal break-words">
+                    <td key={`${rIdx}-${cIdx}`}>
                       <input
-                        className="w-full min-w-[260px] rounded-md border px-2 py-1 text-sm"
+                        className="block w-full min-w-[260px] rounded-md border px-2 py-1 text-sm h-9"
                         value={cell ?? ""}
                         onChange={(e) =>
                           setGlossaryTerms((prev) => {
@@ -1301,14 +1212,13 @@ Dashboard Version: v64
             </tbody>
           </table>
           <div className="p-3">
-            <Button variant="outline" onClick={addNewGlossaryTermFunc}>
+            <Button variant="outline" onClick={() => setGlossaryTerms((prev) => [...prev, ["New Term", "Definition"]])}>
               Add Term
             </Button>
           </div>
         </div>
       )}
 
-      {/* CONFIG */}
       {activeTab === "config" && (
         <div className="grid gap-4 rounded-xl border p-4">
           <div className="text-sm text-muted-foreground">Scenario</div>
