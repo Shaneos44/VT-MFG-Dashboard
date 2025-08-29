@@ -2,1510 +2,1337 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { FileText, Loader2, Plus, Save, Trash2, TrendingUp, Pencil } from "lucide-react";
-import jsPDF from "jspdf";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Plus, Trash2, FileText, CalendarPlus2, Loader2, Download } from "lucide-react";
 import { generateWeeklySummary } from "@/lib/utils";
 import { clone, SEED_PLAN } from "@/lib/constants";
 
-/** =========================== Types =========================== */
+/**
+ * ScaleUpDashboard
+ * - Fixes project-table formatting (wide columns, wrapping, resizable headers, horizontal scroll)
+ * - Restores Meetings tab with modal to schedule + agenda/notes + export summary
+ * - Ensures every tab has Add/Delete row controls
+ * - Debounced autosave of ALL tabs to /api/configurations (Supabase) for the signed-in user
+ * - Weekly & Comprehensive PDF reports with proper page margins/wrapping
+ */
+
 type Variant = "Recess Nanodispensing" | "Dipcoating";
 type ScenarioKey = "50k" | "200k";
 
 interface KPI {
   id: string;
+  scenario_id: string;
   name: string;
-  current_value: number;
   target_value: number;
+  current_value: number;
   unit: string;
   owner: string;
-  scenario_id?: string;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string;
+  updated_at: string;
 }
 
-interface SyncStatus {
-  isOnline: boolean;
-  lastSync: Date;
-  pendingChanges: number;
-  connectedUsers: number;
+interface CostData {
+  id: string;
+  scenario_id: string;
+  capex: number;
+  opex: number;
+  cost_per_unit: number;
+  created_at: string;
+  updated_at: string;
 }
 
-/** ======================= Small Utilities ===================== */
-const ensureArray = (v: any): any[] => (Array.isArray(v) ? v : Array.isArray(v?.data) ? v.data : []);
-const currency = (n: any) => {
-  const num = Number(n || 0);
-  return isFinite(num) ? `$${num.toLocaleString()}` : "$0";
+interface WeeklySummary {
+  week: string;
+  projectsCompleted: number;
+  projectsOnTrack: number;
+  projectsAtRisk: number;
+  keyMilestones: string[];
+  criticalIssues: string[];
+  nextWeekPriorities: string[];
+  kpiSummary: {
+    name: string;
+    current: number;
+    target: number;
+    trend: "up" | "down" | "stable";
+  }[];
+}
+
+const PRODUCT_VARIANTS: Variant[] = ["Recess Nanodispensing", "Dipcoating"];
+
+const DEFAULT_KPIS: KPI[] = [
+  {
+    id: "kpi-1",
+    scenario_id: "default-scenario",
+    name: "Production Efficiency",
+    target_value: 95,
+    current_value: 87,
+    unit: "%",
+    owner: "Production Manager",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: "kpi-2",
+    scenario_id: "default-scenario",
+    name: "Quality Score",
+    target_value: 98,
+    current_value: 94,
+    unit: "%",
+    owner: "Quality Engineer",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: "kpi-3",
+    scenario_id: "default-scenario",
+    name: "Cost Reduction",
+    target_value: 15,
+    current_value: 12,
+    unit: "%",
+    owner: "Operations Lead",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: "kpi-4",
+    scenario_id: "default-scenario",
+    name: "Time to Market",
+    target_value: 180,
+    current_value: 195,
+    unit: "days",
+    owner: "Project Manager",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+];
+
+const COLUMN_MIN = 88; // px
+const COLUMN_MAX = 420; // px
+
+type ColumnKey =
+  | "id"
+  | "name"
+  | "type"
+  | "moscow"
+  | "owner"
+  | "start"
+  | "finish"
+  | "dependencies"
+  | "deliverables"
+  | "goal"
+  | "r"
+  | "a"
+  | "c"
+  | "i"
+  | "needs"
+  | "barriers"
+  | "risks"
+  | "budget_capex"
+  | "budget_opex"
+  | "percent_complete"
+  | "process_link";
+
+const DEFAULT_PROJECT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
+  id: 120,
+  name: 220,
+  type: 140,
+  moscow: 110,
+  owner: 160,
+  start: 140,
+  finish: 140,
+  dependencies: 120,
+  deliverables: 260,
+  goal: 260,
+  r: 56,
+  a: 56,
+  c: 56,
+  i: 56,
+  needs: 200,
+  barriers: 200,
+  risks: 200,
+  budget_capex: 140,
+  budget_opex: 140,
+  percent_complete: 140,
+  process_link: 180,
 };
 
-/** ======================= Main Component ====================== */
+function clamp(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, n));
+}
+
+function useDebouncedCallback<T extends any[]>(fn: (...args: T) => void, delay = 1200) {
+  const ref = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cb = useCallback(
+    (...args: T) => {
+      if (ref.current) clearTimeout(ref.current);
+      ref.current = setTimeout(() => {
+        fn(...args);
+      }, delay);
+    },
+    [fn, delay],
+  );
+  return cb;
+}
+
 export default function ScaleUpDashboard() {
-  /** -------- Core App State -------- */
+  // Tabs
+  const [tab, setTab] = useState<
+    "overview" | "projects" | "manufacturing" | "resources" | "risks" | "meetings" | "kpis" | "financials" | "glossary" | "config"
+  >("projects");
+
+  // Core state
+  const [scenario, setScenario] = useState<ScenarioKey>("50k");
+  const [variant, setVariant] = useState<Variant>("Recess Nanodispensing");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<
-    "Overview" | "Projects" | "Manufacturing" | "Resources" | "Risks" | "Meetings" | "KPIs" | "Financials" | "Glossary" | "Config"
-  >("Projects");
-
-  const [scenario, setScenario] = useState<ScenarioKey>("50k");
-  const [variant, setVariant] = useState<Variant>("Recess Nanodispensing");
-
-  const [plan, setPlan] = useState<any>(() => {
-    const p = clone(SEED_PLAN);
-    if (!p.scenarios) {
-      p.scenarios = {
+  // Data
+  const [plan, setPlan] = useState(() => {
+    const initial = clone(SEED_PLAN);
+    if (!initial.scenarios) {
+      initial.scenarios = {
         "50k": { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 },
         "200k": { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 },
       };
     }
-    if (!p.products) {
-      p.products = {
-        "50k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], kpis: [] },
-        "200k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], kpis: [] },
-      };
-    }
-    return p;
+    return initial;
   });
 
-  /** -------- Tab Data (flat states) -------- */
-  const [projects, setProjects] = useState<any[][]>([]);
-  const [manufacturing, setManufacturing] = useState<any[][]>([]);
-  const [resources, setResources] = useState<any[][]>([]);
-  const [risks, setRisks] = useState<any[][]>([]);
-  const [meetings, setMeetings] = useState<any[][]>([]);
-  const [kpis, setKpis] = useState<KPI[]>([]);
-  const [financials, setFinancials] = useState<any[][]>([]);
-  const [glossary, setGlossary] = useState<any[][]>([]);
+  const [kpis, setKpis] = useState<KPI[]>(DEFAULT_KPIS);
+  const [costData, setCostData] = useState<CostData[]>([]);
+  const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(DEFAULT_PROJECT_COLUMN_WIDTHS);
 
-  /** -------- Sync Status -------- */
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({
-    isOnline: true,
-    lastSync: new Date(),
-    pendingChanges: 0,
-    connectedUsers: 1,
+  // Meetings modal
+  const [showMeetingModal, setShowMeetingModal] = useState(false);
+  const [meetingForm, setMeetingForm] = useState({
+    title: "",
+    date: new Date().toISOString().split("T")[0],
+    time: "10:00",
+    duration: "60",
+    attendees: "",
+    location: "",
+    agenda: "",
+    notes: "",
+    status: "Scheduled",
   });
 
-  /** -------- Meeting Modal -------- */
-  const [meetingModalOpen, setMeetingModalOpen] = useState(false);
-  const [meetingIdx, setMeetingIdx] = useState<number | null>(null);
-  const [meetingDraft, setMeetingDraft] = useState<any[]>([
-    "Weekly Status",
-    new Date().toISOString().slice(0, 10),
-    "10:00",
-    "60 min",
-    "Team",
-    "Room A",
-    "Scheduled",
-    "1) Updates\n2) Risks\n3) Decisions",
-    "",
-  ]);
-
-  const openMeetingModal = (idx: number | null) => {
-    if (idx === null) {
-      setMeetingDraft(["Weekly Status", new Date().toISOString().slice(0, 10), "10:00", "60 min", "Team", "Room A", "Scheduled", "", ""]);
-      setMeetingIdx(null);
-    } else {
-      setMeetingDraft([...(meetings[idx] || meetingDraft)]);
-      setMeetingIdx(idx);
-    }
-    setMeetingModalOpen(true);
-  };
-
-  const saveMeetingFromModal = () => {
-    if (meetingIdx === null) {
-      setMeetings((prev) => [...prev, [...meetingDraft]]);
-    } else {
-      setMeetings((prev) => {
-        const n = [...prev];
-        n[meetingIdx] = [...meetingDraft];
-        return n;
-      });
-    }
-    setMeetingModalOpen(false);
-  };
-
-  const exportMeetingPDF = (mtg: any[]) => {
-    const doc = new jsPDF({ unit: "pt", format: "a4" });
-    const M = 40;
-    let y = M;
-
-    const add = (t: string, bold = false) => {
-      doc.setFont("helvetica", bold ? "bold" : "normal");
-      doc.setFontSize(bold ? 14 : 11);
-      const lines = doc.splitTextToSize(t, 595 - 2 * M);
-      lines.forEach((ln: string) => {
-        if (y > 800) {
-          doc.addPage();
-          y = M;
-        }
-        doc.text(ln, M, y);
-        y += 16;
-      });
-      y += 4;
+  // Derived - current "product" container
+  const current = useMemo(() => {
+    const base = (plan.products && plan.products[scenario]) || {};
+    return {
+      projects: (base.projects || []) as any[][],
+      manufacturing: (base.manufacturing || []) as any[][],
+      resources: (base.resources || []) as any[][],
+      risks: (base.risks || []) as any[][],
+      meetings: (base.meetings || []) as any[][],
+      financials: (base.financials || []) as any[][],
+      glossary: (base.glossary || []) as any[][],
+      launch: base.launch || {
+        fiftyK: new Date().toISOString(),
+        twoHundredK: new Date().toISOString(),
+      },
     };
+  }, [plan, scenario]);
 
-    add("VitalTrace – Meeting Summary", true);
-    add(`Title: ${mtg[0]}`);
-    add(`Date: ${mtg[1]}   Time: ${mtg[2]}   Duration: ${mtg[3]}`);
-    add(`Attendees: ${mtg[4]}`);
-    add(`Location: ${mtg[5]}`);
-    add(`Status: ${mtg[6]}`);
-    add("Agenda:", true);
-    add(mtg[7] || "—");
-    add("Notes:", true);
-    add(mtg[8] || "—");
-
-    doc.save(`Meeting_${(mtg[0] || "Summary").replace(/\s+/g, "_")}_${mtg[1]}.pdf`);
-  };
-
-  const exportMeetingICS = (mtg: any[]) => {
-    const DTSTART = `${mtg[1]?.replace(/-/g, "")}T${(mtg[2] || "10:00").replace(":", "")}00`;
-    const UID = `${Date.now()}@vitaltrace`;
-    const ics = [
-      "BEGIN:VCALENDAR",
-      "VERSION:2.0",
-      "PRODID:-//VitalTrace//Meeting//EN",
-      "CALSCALE:GREGORIAN",
-      "METHOD:PUBLISH",
-      "BEGIN:VEVENT",
-      `UID:${UID}`,
-      `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`,
-      `DTSTART:${DTSTART}`,
-      `SUMMARY:${mtg[0] || "Meeting"}`,
-      `DESCRIPTION:${(mtg[7] || "")}\nNotes:${mtg[8] || ""}`.replace(/\n/g, "\\n"),
-      `LOCATION:${mtg[5] || ""}`,
-      "END:VEVENT",
-      "END:VCALENDAR",
-    ].join("\r\n");
-
-    const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement("a"), {
-      href: url,
-      download: `Meeting_${(mtg[0] || "Event").replace(/\s+/g, "_")}.ics`,
-    });
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  /** -------- Load saved data -------- */
+  // ---------- Load from DB once ----------
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
-        setError(null);
-        const controller = new AbortController();
-        const to = setTimeout(() => controller.abort(), 12000);
-        const res = await fetch("/api/configurations", { signal: controller.signal });
-        clearTimeout(to);
+        const resp = await fetch("/api/configurations");
+        if (!resp.ok) throw new Error(`GET /api/configurations ${resp.status}`);
+        const configs = await resp.json();
+        const cfg =
+          configs.find((c: any) => c.name === "ScaleUp-Dashboard-Config") ||
+          configs
+            .filter((c: any) => c.name?.includes("ScaleUp"))
+            .sort((a: any, b: any) => +new Date(b.updated_at) - +new Date(a.updated_at))[0];
 
-        if (!res.ok) {
-          if (res.status === 401) {
-            setError("Please sign in to load and save your dashboard data.");
-          } else {
-            setError(`Failed to load: ${res.statusText}`);
-          }
-          setLoading(false);
-          return;
-        }
-
-        const rows = await res.json();
-        const latest = Array.isArray(rows) ? rows.find((r: any) => r.name === "ScaleUp-Dashboard-Config") ?? rows[0] : null;
-
-        if (latest?.data) {
-          const d = latest.data;
-          setPlan(d.plan ?? plan);
-          setScenario(d.scenario ?? scenario);
-          setVariant(d.variant ?? variant);
-
-          const prod = d.plan?.products?.[d.scenario ?? scenario] ?? {};
-          setProjects(ensureArray(prod.projects));
-          setManufacturing(ensureArray(prod.manufacturing));
-          setResources(ensureArray(prod.resources));
-          setRisks(ensureArray(prod.risks));
-          setMeetings(ensureArray(prod.meetings));
-          setKpis(Array.isArray(d.kpis) ? d.kpis : ensureArray(prod.kpis));
-          setFinancials(ensureArray(d.financials?.[d.scenario ?? scenario]) || ensureArray(d.financials));
-          setGlossary(ensureArray(d.glossary));
+        if (cfg?.data) {
+          const d = cfg.data;
+          if (d.plan) setPlan(d.plan);
+          if (d.scenario) setScenario(d.scenario);
+          if (d.variant) setVariant(d.variant);
+          if (Array.isArray(d.kpis)) setKpis(d.kpis);
+          if (d.columnWidths) setColumnWidths(d.columnWidths);
         }
       } catch (e: any) {
-        setError(e?.message ?? "Failed to load data.");
+        console.error(e);
+        setError("Failed to load data. Using defaults.");
       } finally {
         setLoading(false);
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** -------- Autosave -------- */
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const scheduleSave = useCallback(() => {
-    setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }));
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(async () => {
-      await saveAll();
-    }, 1400);
-  }, []);
-
-  const saveAll = useCallback(async () => {
+  // ---------- Debounced autosave for everything ----------
+  const debouncedSave = useDebouncedCallback(async (payload: any) => {
+    setSaving(true);
     try {
-      setSaving(true);
-      setPlan((prev: any) => {
-        const next = { ...prev, products: { ...prev.products } };
-        next.products[scenario] = {
-          ...(next.products[scenario] || {}),
-          projects,
-          manufacturing,
-          resources,
-          risks,
-          meetings,
-          kpis,
-        };
-        const payload = {
-          plan: next,
-          scenario,
-          variant,
-          financials: { [scenario]: financials },
-          glossary,
-          lastSaved: new Date().toISOString(),
-        };
-        (async () => {
-          const res = await fetch("/api/configurations", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: "ScaleUp-Dashboard-Config",
-              description: "ScaleUp Dashboard Configuration",
-              data: payload,
-              modified_by: "dashboard",
-              upsert: true,
-            }),
-          });
-          if (!res.ok) {
-            const j = await res.json().catch(() => ({}));
-            setError(j?.error ?? `Save failed (${res.status})`);
-            setSyncStatus((s) => ({ ...s, isOnline: false }));
-          } else {
-            setError(null);
-            setSyncStatus((s) => ({ ...s, isOnline: true, pendingChanges: 0, lastSync: new Date() }));
-          }
-          setSaving(false);
-        })();
-        return next;
+      const resp = await fetch("/api/configurations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: "ScaleUp-Dashboard-Config",
+          description: "ScaleUp Dashboard Configuration",
+          data: payload,
+          modified_by: "dashboard",
+          upsert: true,
+        }),
       });
-    } catch (e: any) {
+      if (!resp.ok) {
+        const e = await resp.json().catch(() => ({}));
+        throw new Error(e?.error || `POST /api/configurations ${resp.status}`);
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
       setSaving(false);
-      setSyncStatus((s) => ({ ...s, isOnline: false }));
-      setError(e?.message ?? "Failed to save.");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projects, manufacturing, resources, risks, meetings, kpis, financials, glossary, scenario, variant]);
+  }, 1200);
 
   useEffect(() => {
-    if (!loading) scheduleSave();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projects, manufacturing, resources, risks, meetings, kpis, financials, glossary, scenario, variant, loading]);
+    if (loading) return;
+    debouncedSave({ plan, scenario, variant, kpis, columnWidths, lastSaved: new Date().toISOString() });
+  }, [plan, scenario, variant, kpis, columnWidths, loading, debouncedSave]);
 
-  /** -------- Overview metrics -------- */
-  const scenarioCfg =
-    plan?.scenarios?.[scenario] ?? (scenario === "50k" ? { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 } : { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 });
+  // ---------- Helpers ----------
+  const updateProduct = useCallback(
+    (updater: (draft: any) => void) => {
+      setPlan((prev: any) => {
+        const next = clone(prev);
+        if (!next.products) next.products = {};
+        if (!next.products[scenario]) next.products[scenario] = {};
+        updater(next.products[scenario]);
+        return next;
+      });
+    },
+    [scenario],
+  );
 
-  const overview = useMemo(() => {
-    const totalProjects = projects.length;
-    const active = Math.floor(totalProjects * 0.7);
-    const completed = Math.floor(totalProjects * 0.2);
-    const atRisk = totalProjects - active - completed;
-    const totalResources = resources.reduce((acc, r) => acc + Number(r?.[2] || 0), 0);
-    const kpiHealth =
-      kpis.length > 0
-        ? Math.round((kpis.filter((k) => k.current_value >= k.target_value * 0.9).length / kpis.length) * 100)
-        : 85;
-    return {
-      totalProjects,
-      active,
-      completed,
-      atRisk,
-      totalResources,
-      kpiHealth,
-      capacityUtil: Math.round((scenarioCfg.unitsPerYear / (scenario === "50k" ? 60000 : 250000)) * 100),
-    };
-  }, [projects, resources, kpis, scenario, scenarioCfg]);
+  // ---------- Projects table (resizable + wrapping) ----------
+  const resizingRef = useRef<{ key: ColumnKey; startX: number; startW: number } | null>(null);
 
-  /** -------- Weekly TXT -------- */
-  const exportWeeklySummary = () => {
-    const sum = generateWeeklySummary?.() ?? {
-      week: new Date().toISOString().slice(0, 10),
-      projectsCompleted: 0,
-      projectsOnTrack: 0,
-      projectsAtRisk: 0,
-      keyMilestones: [],
-      criticalIssues: [],
-      nextWeekPriorities: [],
-      kpiSummary: [],
-    };
+  const onResizeStart = (e: React.MouseEvent, key: ColumnKey) => {
+    const th = (e.currentTarget as HTMLElement).parentElement as HTMLElement;
+    const startW = th?.offsetWidth || columnWidths[key];
+    resizingRef.current = { key, startX: e.clientX, startW };
+    document.addEventListener("mousemove", onResizing as any);
+    document.addEventListener("mouseup", onResizeEnd as any);
+  };
+  const onResizing = (e: MouseEvent) => {
+    const r = resizingRef.current;
+    if (!r) return;
+    const delta = e.clientX - r.startX;
+    const newW = clamp(r.startW + delta, COLUMN_MIN, COLUMN_MAX);
+    setColumnWidths((w) => ({ ...w, [r.key]: newW }));
+  };
+  const onResizeEnd = () => {
+    resizingRef.current = null;
+    document.removeEventListener("mousemove", onResizing as any);
+    document.removeEventListener("mouseup", onResizeEnd as any);
+  };
 
-    const content = `
-WEEKLY PROJECT SUMMARY - ${sum.week}
+  const projectCols: { key: ColumnKey; label: string; type: "text" | "date" | "number" | "textarea" | "short"; wrap?: boolean }[] =
+    useMemo(
+      () => [
+        { key: "id", label: "id", type: "text" },
+        { key: "name", label: "name", type: "text", wrap: true },
+        { key: "type", label: "type", type: "text" },
+        { key: "moscow", label: "moscow", type: "text" },
+        { key: "owner", label: "owner", type: "text" },
+        { key: "start", label: "start", type: "date" },
+        { key: "finish", label: "finish", type: "date" },
+        { key: "dependencies", label: "dependencies", type: "number" },
+        { key: "deliverables", label: "deliverables", type: "textarea", wrap: true },
+        { key: "goal", label: "goal", type: "textarea", wrap: true },
+        { key: "r", label: "R", type: "short" },
+        { key: "a", label: "A", type: "short" },
+        { key: "c", label: "C", type: "short" },
+        { key: "i", label: "I", type: "short" },
+        { key: "needs", label: "needs", type: "textarea", wrap: true },
+        { key: "barriers", label: "barriers", type: "textarea", wrap: true },
+        { key: "risks", label: "risks", type: "textarea", wrap: true },
+        { key: "budget_capex", label: "budget_capex", type: "number" },
+        { key: "budget_opex", label: "budget_opex", type: "number" },
+        { key: "percent_complete", label: "percent_complete", type: "number" },
+        { key: "process_link", label: "process_link", type: "text", wrap: true },
+      ],
+      [],
+    );
+
+  const addProject = () => {
+    const row: any[] = [
+      `PROJ-${Date.now()}`,
+      "New Project",
+      "Planning",
+      "Must",
+      "Project Manager",
+      new Date().toISOString().split("T")[0],
+      new Date(Date.now() + 14 * 864e5).toISOString().split("T")[0],
+      0,
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      0,
+      0,
+      0,
+      "",
+    ];
+    updateProduct((p) => {
+      p.projects = [...(p.projects || []), row];
+    });
+  };
+
+  const deleteSelectedProjects = () => {
+    const ids = Object.keys(selectedRows.current);
+    if (ids.length === 0) return;
+    updateProduct((p) => {
+      p.projects = (p.projects || []).filter((r: any[]) => !selectedRows.current[r[0]]);
+    });
+    selectedRows.current = {};
+  };
+
+  const setProjectCell = (rowIndex: number, colIndex: number, value: any) => {
+    updateProduct((p) => {
+      const next = (p.projects || []).map((r: any[], i: number) => (i === rowIndex ? r.map((c: any, j: number) => (j === colIndex ? value : c)) : r));
+      p.projects = next;
+    });
+  };
+
+  const autoGrow = (el: HTMLTextAreaElement | null) => {
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  };
+
+  const selectedRows = useRef<Record<string, boolean>>({});
+
+  // ---------- Meetings ----------
+  const saveMeetingFromModal = () => {
+    const row = [
+      `MEET-${Date.now()}`,
+      meetingForm.title || "New Meeting",
+      meetingForm.date,
+      meetingForm.time,
+      meetingForm.duration,
+      meetingForm.attendees,
+      meetingForm.location,
+      meetingForm.agenda,
+      meetingForm.notes,
+      meetingForm.status,
+    ];
+    updateProduct((p) => {
+      p.meetings = [...(p.meetings || []), row];
+    });
+    setShowMeetingModal(false);
+    setMeetingForm({
+      title: "",
+      date: new Date().toISOString().split("T")[0],
+      time: "10:00",
+      duration: "60",
+      attendees: "",
+      location: "",
+      agenda: "",
+      notes: "",
+      status: "Scheduled",
+    });
+  };
+
+  const exportMeetingSummary = async (row: any[]) => {
+    const [id, title, date, time, duration, attendees, location, agenda, notes, status] = row;
+    const docModule = await import("jspdf");
+    const autoTable = await import("jspdf-autotable");
+    const jsPDF = docModule.jsPDF;
+
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const pageW = doc.internal.pageSize.getWidth();
+    const margin = 40;
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("Meeting Summary", margin, 50);
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.text(`ID: ${id}`, margin, 70);
+    doc.text(`Title: ${title}`, margin, 86);
+    doc.text(`When: ${date} ${time} (${duration} min)`, margin, 102);
+    doc.text(`Status: ${status}`, margin, 118);
+    doc.text(`Location: ${location}`, margin, 134);
+    doc.text(`Attendees: ${attendees}`, margin, 150);
+
+    (autoTable as any).default(doc, {
+      startY: 175,
+      margin: { left: margin, right: margin },
+      theme: "grid",
+      headStyles: { fillColor: [17, 24, 39] },
+      styles: { fontSize: 9, cellPadding: 6 },
+      head: [["Section", "Content"]],
+      body: [
+        ["Agenda", agenda || "-"],
+        ["Notes", notes || "-"],
+      ],
+    });
+
+    doc.save(`Meeting_${date}_${title || "Summary"}.pdf`);
+  };
+
+  // ---------- Reports ----------
+  const exportWeeklySummaryTxt = () => {
+    const summary: WeeklySummary = generateWeeklySummary();
+
+    const text = `
+WEEKLY PROJECT SUMMARY - ${summary.week}
 VitalTrace Manufacturing Scale-Up Dashboard
 Scenario: ${scenario} | Variant: ${variant}
 
-═══════════════════════════════════════════════════════════════
+Projects Completed: ${summary.projectsCompleted}
+Projects On Track: ${summary.projectsOnTrack}
+Projects At Risk: ${summary.projectsAtRisk}
 
-📊 PROJECT STATUS OVERVIEW
-• Projects Completed: ${sum.projectsCompleted}
-• Projects On Track: ${sum.projectsOnTrack}
-• Projects At Risk: ${sum.projectsAtRisk}
-• Total Active Projects: ${sum.projectsCompleted + sum.projectsOnTrack + sum.projectsAtRisk}
+KEY MILESTONES
+${summary.keyMilestones.map((m) => `- ${m}`).join("\n")}
 
-🎯 KEY MILESTONES
-${sum.keyMilestones.map((m: string) => `• ${m}`).join("\n") || "• —"}
+CRITICAL ISSUES
+${summary.criticalIssues.map((m) => `- ${m}`).join("\n") || "- None"}
 
-⚠️ CRITICAL ISSUES
-${sum.criticalIssues.map((m: string) => `• ${m}`).join("\n") || "• —"}
+KPI SUMMARY
+${summary.kpiSummary.map((k) => `- ${k.name}: ${k.current}/${k.target} (${k.trend})`).join("\n")}
 
-📈 KPI PERFORMANCE
-${
-  sum.kpiSummary?.length
-    ? sum.kpiSummary
-        .map(
-          (k: any) => `• ${k.name}: ${k.current}/${k.target} ${k.trend === "up" ? "↗" : k.trend === "down" ? "↘" : "→"}`
-        )
-        .join("\n")
-    : "• —"
-}
+NEXT WEEK PRIORITIES
+${summary.nextWeekPriorities.map((m) => `- ${m}`).join("\n")}
 
-🚀 NEXT WEEK PRIORITIES
-${sum.nextWeekPriorities.map((m: string) => `• ${m}`).join("\n") || "• —"}
-
-═══════════════════════════════════════════════════════════════
 Generated: ${new Date().toLocaleString()}
-Dashboard Version: v66
     `.trim();
 
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `Weekly_Summary_${sum.week}_${variant}_${scenario}.txt`;
+    a.download = `Weekly_Summary_${summary.week}_${variant}_${scenario}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  /** -------- Comprehensive PDF -------- */
-  const generateComprehensiveReportPDF = () => {
-    const PAGE_W = 595;
-    const PAGE_H = 842;
-    const M = 40;
-    const LINE = 14;
-    const GAP = 8;
+  const exportComprehensivePDF = async () => {
+    const docModule = await import("jspdf");
+    const autoTable = await import("jspdf-autotable");
+    const jsPDF = docModule.jsPDF;
 
-    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
-    let y = M;
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const margin = 36;
+    const contentW = doc.internal.pageSize.getWidth() - margin * 2;
+    let y = 48;
 
-    const ensureSpace = (needed: number) => {
-      if (y + needed > PAGE_H - M) {
-        doc.addPage();
-        y = M;
-      }
-    };
-    const hr = () => {
-      ensureSpace(12);
-      doc.setDrawColor(210, 210, 210);
-      doc.line(M, y, PAGE_W - M, y);
-      y += 12;
-    };
-    const title = (t: string) => {
-      ensureSpace(22);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(18);
+    doc.text("VitalTrace – Comprehensive Scale-Up Report", margin, y);
+    y += 14;
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Generated: ${new Date().toLocaleString()}`, margin, y);
+    y += 14;
+    doc.text(`Scenario: ${scenario}  •  Variant: ${variant}`, margin, y);
+    y += 18;
+
+    const section = (title: string) => {
       doc.setFont("helvetica", "bold");
-      doc.setFontSize(13);
-      doc.text(t, M, y);
-      y += 18;
+      doc.setFontSize(12);
+      doc.text(title, margin, (y += 18));
       doc.setFont("helvetica", "normal");
-      doc.setFontSize(10);
+      doc.setFontSize(9);
     };
-    const addWrapped = (text: string, indent = 0, size = 10, lh = LINE) => {
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(size);
-      const maxW = PAGE_W - 2 * M - indent;
-      const lines = doc.splitTextToSize(text, maxW);
-      lines.forEach((ln: string) => {
-        ensureSpace(lh);
-        doc.text(ln, M + indent, y);
-        y += lh;
+
+    const wrapText = (txt: string) => {
+      const lines = doc.splitTextToSize(txt || "-", contentW);
+      lines.forEach((line: string) => {
+        if (y > doc.internal.pageSize.getHeight() - 60) {
+          doc.addPage();
+          y = 48;
+        }
+        doc.text(line, margin, (y += 12));
       });
     };
 
-    // header
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(16);
-    doc.text("VitalTrace – Comprehensive Scale-Up Report", M, y);
-    y += 22;
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(10);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, M, y);
-    y += 14;
-    doc.text(`Scenario: ${scenario}  •  Variant: ${variant}`, M, y);
-    y += 10;
-    hr();
-
     // Projects
-    title("Projects");
-    if (!projects.length) addWrapped("• No projects found.");
-    projects.forEach((p) => {
-      const name = p?.[1] ?? "Project";
-      const status = p?.[22] || p?.[2] || "—";
-      addWrapped(`• ${name}  [${status}]`);
-      addWrapped(`Owner: ${p?.[4] || "—"}`, 16);
-      addWrapped(`Dates: ${p?.[5] || "—"} → ${p?.[6] || "—"}`, 16);
-      addWrapped(`Goal: ${p?.[9] || "—"}`, 16);
-      addWrapped(`CapEx: ${currency(p?.[17])} • OpEx: ${currency(p?.[18])} • Progress: ${p?.[19] || 0}%`, 16);
-      y += GAP;
+    section("Projects");
+    const projRows = (current.projects || []).map((r) => [
+      r[0],
+      r[1],
+      r[2],
+      r[3],
+      r[4],
+      r[5],
+      r[6],
+      String(r[19] ?? "0") + "%",
+      "$" + String(r[17] ?? 0),
+      "$" + String(r[18] ?? 0),
+    ]);
+
+    (autoTable as any).default(doc, {
+      startY: y + 8,
+      margin: { left: margin, right: margin },
+      styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+      headStyles: { fillColor: [17, 24, 39] },
+      head: [["ID", "Name", "Type", "MoSCoW", "Owner", "Start", "Finish", "%", "CapEx", "OpEx"]],
+      body: projRows,
+      didDrawPage: (data: any) => {
+        y = data.cursor.y;
+      },
     });
-    hr();
 
     // Resources
-    title("Resources");
-    if (!resources.length) addWrapped("• No resources found.");
-    resources.forEach((r) => {
-      addWrapped(`• ${r?.[0] || "Role"} — ${r?.[1] || "Type"} — Qty ${r?.[2] || 0} — ${currency(r?.[3])} — ${r?.[4] || "Dept"}`);
-      if (r?.[5]) addWrapped(`Notes: ${r?.[5]}`, 16);
-      y += GAP;
-    });
-    hr();
+    section("Resources");
+    wrapText((current.resources || []).map((r) => `• ${r.join(" — ")}`).join("\n") || "-");
 
     // Risks
-    title("Risks");
-    if (!risks.length) addWrapped("• No risks found.");
-    risks.forEach((r) => {
-      addWrapped(
-        `• (${r?.[0] || "ID"}) ${r?.[1] || "Risk"} — Impact ${r?.[2] || "—"}, Prob ${r?.[3] || "—"} — Owner ${r?.[5] || "—"} — Due ${r?.[6] || "—"} — ${r?.[7] || "Open"}`
-      );
-      if (r?.[4]) addWrapped(`Mitigation: ${r?.[4]}`, 16);
-      y += GAP;
-    });
-    hr();
+    section("Risks");
+    wrapText((current.risks || []).map((r) => `• ${r.join(" — ")}`).join("\n") || "-");
 
-    // Meetings
-    title("Meetings");
-    if (!meetings.length) addWrapped("• No meetings found.");
-    meetings.forEach((m) => {
-      addWrapped(`• ${m?.[0] || "Meeting"} — ${m?.[1] || ""} ${m?.[2] || ""} — ${m?.[3] || ""} — ${m?.[6] || "Scheduled"}`);
-      addWrapped(`Attendees: ${m?.[4] || "—"}`, 16);
-      addWrapped(`Location: ${m?.[5] || "—"}`, 16);
-      if (m?.[7]) addWrapped(`Agenda: ${m?.[7]}`, 16);
-      if (m?.[8]) addWrapped(`Notes: ${m?.[8]}`, 16);
-      y += GAP;
-    });
-    hr();
+    // Manufacturing
+    section("Manufacturing");
+    wrapText((current.manufacturing || []).map((r) => `• ${r.join(" — ")}`).join("\n") || "-");
 
     // KPIs
-    title("KPIs");
-    if (!kpis.length) addWrapped("• No KPIs defined.");
-    kpis.forEach((k) => addWrapped(`• ${k.name}: ${k.current_value}${k.unit} / ${k.target_value}${k.unit} — Owner: ${k.owner || "—"}`));
+    section("KPIs");
+    (autoTable as any).default(doc, {
+      startY: y + 8,
+      margin: { left: margin, right: margin },
+      styles: { fontSize: 8, cellPadding: 4, overflow: "linebreak" },
+      headStyles: { fillColor: [17, 24, 39] },
+      head: [["Name", "Current", "Target", "Unit", "Owner"]],
+      body: kpis.map((k) => [k.name, String(k.current_value), String(k.target_value), k.unit, k.owner]),
+      didDrawPage: (data: any) => {
+        y = data.cursor.y;
+      },
+    });
 
-    addWrapped(`\n\nEnd of report • Scenario ${scenario} • Variant ${variant}`);
-    doc.save(`VitalTrace_Comprehensive_Report_${variant}_${scenario}.pdf`);
+    doc.save(`ScaleUp_Report_${variant}_${scenario}.pdf`);
   };
 
-  /** ========================= Row Helpers ========================= */
-  const addProject = () =>
-    setProjects((prev) => [
-      ...prev,
-      [
-        `PROJ-${Date.now()}`,
-        "New Project",
-        "Planning",
-        "Must",
-        "Project Manager",
-        new Date().toISOString().slice(0, 10),
-        new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
-        0,
-        "",
-        "",
-        "R",
-        "A",
-        "C",
-        "I",
-        "",
-        "",
-        "",
-        0,
-        0,
-        0,
-        "",
-        "false",
-        "GREEN",
-        0,
-      ],
-    ]);
-  const deleteProject = (i: number) => setProjects((prev) => prev.filter((_, idx) => idx !== i));
-  const editProject = (i: number, j: number, v: any) =>
-    setProjects((prev) => {
-      const n = [...prev];
-      n[i] = [...n[i]];
-      n[i][j] = v;
-      return n;
-    });
-
-  const addManufacturing = () =>
-    setManufacturing((prev) => [...prev, ["New Process", 0, 1, 100, 0, "Manual Station", "Manual", "Planning", "Owner"]]);
-  const deleteManufacturing = (i: number) => setManufacturing((prev) => prev.filter((_, idx) => idx !== i));
-  const editManufacturing = (i: number, j: number, v: any) =>
-    setManufacturing((prev) => {
-      const n = [...prev];
-      n[i] = [...n[i]];
-      n[i][j] = v;
-      return n;
-    });
-
-  const addResource = () => setResources((prev) => [...prev, ["New Resource", "Personnel", 1, 0, "Department", ""]]);
-  const deleteResource = (i: number) => setResources((prev) => prev.filter((_, idx) => idx !== i));
-  const editResource = (i: number, j: number, v: any) =>
-    setResources((prev) => {
-      const n = [...prev];
-      n[i] = [...n[i]];
-      n[i][j] = v;
-      return n;
-    });
-
-  const addRisk = () =>
-    setRisks((prev) => [...prev, [`RISK-${Date.now()}`, "New risk", "M", "M", "Mitigation", "Owner", new Date().toISOString().slice(0, 10), "Open"]]);
-  const deleteRisk = (i: number) => setRisks((prev) => prev.filter((_, idx) => idx !== i));
-  const editRisk = (i: number, j: number, v: any) =>
-    setRisks((prev) => {
-      const n = [...prev];
-      n[i] = [...n[i]];
-      n[i][j] = v;
-      return n;
-    });
-
-  const addMeeting = () => openMeetingModal(null);
-  const deleteMeeting = (i: number) => setMeetings((prev) => prev.filter((_, idx) => idx !== i));
-  const editInlineMeeting = (i: number, j: number, v: any) =>
-    setMeetings((prev) => {
-      const n = [...prev];
-      n[i] = [...n[i]];
-      n[i][j] = v;
-      return n;
-    });
-
-  const addKPI = () =>
-    setKpis((prev) => [
-      ...prev,
-      {
-        id: `kpi-${Date.now()}`,
-        name: "New KPI",
-        current_value: 0,
-        target_value: 100,
-        unit: "%",
-        owner: "Owner",
-        scenario_id: `scenario-${scenario}`,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      },
-    ]);
-  const deleteKPI = (id: string) => setKpis((prev) => prev.filter((k) => k.id !== id));
-  const editKPI = (id: string, field: keyof KPI, value: any) =>
-    setKpis((prev) =>
-      prev.map((k) => (k.id === id ? { ...k, [field]: field.includes("value") ? Number(value) || 0 : value, updated_at: new Date().toISOString() } : k))
+  // ---------- Simple renderers per tab ----------
+  const renderHeader = () => {
+    return (
+      <div className="sticky top-0 z-30 flex items-center justify-between bg-white/80 backdrop-blur border-b px-4 py-2">
+        <div className="flex items-center gap-2">
+          <select
+            className="h-9 rounded-md border px-3"
+            value={variant}
+            onChange={(e) => setVariant(e.target.value as Variant)}
+          >
+            {PRODUCT_VARIANTS.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+          <select
+            className="h-9 rounded-md border px-3"
+            value={scenario}
+            onChange={(e) => setScenario(e.target.value as ScenarioKey)}
+          >
+            <option value="50k">50k</option>
+            <option value="200k">200k</option>
+          </select>
+          <span className="text-sm text-slate-500">{saving ? "Saving…" : "All changes saved"}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" onClick={exportWeeklySummaryTxt} className="gap-2">
+            <FileText className="h-4 w-4" />
+            Weekly Summary (TXT)
+          </Button>
+          <Button size="sm" onClick={exportComprehensivePDF} className="gap-2">
+            <Download className="h-4 w-4" />
+            Comprehensive Report (PDF)
+          </Button>
+        </div>
+      </div>
     );
+  };
 
-  const addFinancial = () => setFinancials((prev) => [...prev, ["COGS", "Item", 0, "Expense", ""]]);
-  const deleteFinancial = (i: number) => setFinancials((prev) => prev.filter((_, idx) => idx !== i));
-  const editFinancial = (i: number, j: number, v: any) =>
-    setFinancials((prev) => {
-      const n = [...prev];
-      n[i] = [...n[i]];
-      n[i][j] = j === 2 ? Number(v) || 0 : v;
-      return n;
-    });
+  const renderTabs = () => {
+    const TAB: [typeof tab, string][] = [
+      ["overview", "Overview"],
+      ["projects", "Projects"],
+      ["manufacturing", "Manufacturing"],
+      ["resources", "Resources"],
+      ["risks", "Risks"],
+      ["meetings", "Meetings"],
+      ["kpis", "KPIs"],
+      ["financials", "Financials"],
+      ["glossary", "Glossary"],
+      ["config", "Config"],
+    ];
+    return (
+      <div className="flex gap-2 border-b px-3 py-2 bg-slate-50">
+        {TAB.map(([k, label]) => (
+          <button
+            key={k}
+            onClick={() => setTab(k)}
+            className={`rounded-md px-3 py-1 text-sm ${
+              tab === k ? "bg-white shadow border" : "hover:bg-white"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+    );
+  };
 
-  const addGlossary = () => setGlossary((prev) => [...prev, ["New Term", "Definition"]]);
-  const deleteGlossary = (i: number) => setGlossary((prev) => prev.filter((_, idx) => idx !== i));
-  const editGlossary = (i: number, j: number, v: any) =>
-    setGlossary((prev) => {
-      const n = [...prev];
-      n[i] = [...n[i]];
-      n[i][j] = v;
-      return n;
-    });
+  const renderProjects = () => {
+    const cols = projectCols;
+    const rows = current.projects || [];
 
-  /** ============================ UI ============================ */
+    return (
+      <div className="px-3 py-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Projects</h2>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={addProject} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Project
+            </Button>
+            <Button size="sm" variant="destructive" onClick={deleteSelectedProjects} className="gap-2">
+              <Trash2 className="h-4 w-4" />
+              Delete Selected
+            </Button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto rounded-md border">
+          <table className="min-w-[1200px] table-fixed">
+            <colgroup>
+              {/* selection col */}
+              <col style={{ width: 48 }} />
+              {cols.map((c) => (
+                <col key={c.key} style={{ width: columnWidths[c.key] }} />
+              ))}
+            </colgroup>
+            <thead className="bg-slate-50 text-slate-700 text-xs uppercase">
+              <tr>
+                <th className="sticky left-0 z-10 bg-slate-50 px-2 py-2 text-left"> </th>
+                {cols.map((c) => (
+                  <th key={c.key} className="relative px-2 py-2 text-left select-none">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate">{c.label}</span>
+                      <span className="text-[10px] text-slate-400">{Math.round(columnWidths[c.key])}px</span>
+                    </div>
+                    <div
+                      onMouseDown={(e) => onResizeStart(e, c.key)}
+                      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-slate-300"
+                    />
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="text-sm">
+              {rows.map((r, ri) => (
+                <tr key={r[0] || ri} className="border-t">
+                  <td className="sticky left-0 z-10 bg-white px-2 py-2">
+                    <input
+                      type="checkbox"
+                      onChange={(e) => {
+                        const id = String(r[0]);
+                        if (e.target.checked) selectedRows.current[id] = true;
+                        else delete selectedRows.current[id];
+                      }}
+                    />
+                  </td>
+                  {/* map cells with proper editor */}
+                  {/* r indexes must match our 21 columns defined above */}
+                  {cols.map((c, ci) => {
+                    const colIndex = (() => {
+                      // map projectCols order -> row index
+                      const order: ColumnKey[] = [
+                        "id",
+                        "name",
+                        "type",
+                        "moscow",
+                        "owner",
+                        "start",
+                        "finish",
+                        "dependencies",
+                        "deliverables",
+                        "goal",
+                        "r",
+                        "a",
+                        "c",
+                        "i",
+                        "needs",
+                        "barriers",
+                        "risks",
+                        "budget_capex",
+                        "budget_opex",
+                        "percent_complete",
+                        "process_link",
+                      ];
+                      return order.indexOf(c.key);
+                    })();
+
+                    const value = r[colIndex] ?? "";
+
+                    const baseCell =
+                      c.type === "textarea" ? (
+                        <Textarea
+                          defaultValue={value}
+                          onChange={(e) => setProjectCell(ri, colIndex, e.target.value)}
+                          ref={autoGrow as any}
+                          className="min-h-[36px] resize-none whitespace-normal break-words leading-snug"
+                        />
+                      ) : c.type === "date" ? (
+                        <Input
+                          type="date"
+                          value={value || ""}
+                          onChange={(e) => setProjectCell(ri, colIndex, e.target.value)}
+                          className="h-9"
+                        />
+                      ) : c.type === "number" ? (
+                        <Input
+                          type="number"
+                          value={String(value ?? 0)}
+                          onChange={(e) => setProjectCell(ri, colIndex, Number(e.target.value || 0))}
+                          className="h-9"
+                        />
+                      ) : (
+                        <Input
+                          value={String(value ?? "")}
+                          onChange={(e) => setProjectCell(ri, colIndex, e.target.value)}
+                          className="h-9"
+                        />
+                      );
+
+                    return (
+                      <td key={c.key} className="px-2 py-2 align-top">
+                        <div className={c.wrap ? "whitespace-normal break-words" : "truncate"}>{baseCell}</div>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={cols.length + 1} className="px-3 py-8 text-center text-slate-500">
+                    No projects yet. Click “Add Project” to create your first row.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  const simpleGrid = (
+    title: string,
+    keyName:
+      | "manufacturing"
+      | "resources"
+      | "risks"
+      | "financials"
+      | "glossary",
+    columns: { label: string; type: "text" | "number" | "date" | "textarea" }[],
+  ) => {
+    const rows = current[keyName] || [];
+    const addRow = () => {
+      updateProduct((p) => {
+        const blank = columns.map((c) =>
+          c.type === "number" ? 0 : c.type === "date" ? new Date().toISOString().split("T")[0] : "",
+        );
+        (p[keyName] as any[]) = [...(p[keyName] || []), blank];
+      });
+    };
+    const deleteRow = (idx: number) => {
+      updateProduct((p) => {
+        (p[keyName] as any[]) = (p[keyName] || []).filter((_: any, i: number) => i !== idx);
+      });
+    };
+    const setCell = (ri: number, ci: number, v: any) => {
+      updateProduct((p) => {
+        const next = (p[keyName] || []).map((r: any[], i: number) => (i === ri ? r.map((c: any, j: number) => (j === ci ? v : c)) : r));
+        (p[keyName] as any[]) = next;
+      });
+    };
+
+    return (
+      <div className="px-3 py-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">{title}</h2>
+          <Button size="sm" onClick={addRow} className="gap-2">
+            <Plus className="h-4 w-4" />
+            Add Row
+          </Button>
+        </div>
+
+        <div className="overflow-x-auto rounded-md border">
+          <table className="min-w-[900px] table-fixed">
+            <thead className="bg-slate-50 text-slate-700 text-xs uppercase">
+              <tr>
+                {columns.map((c) => (
+                  <th key={c.label} className="px-2 py-2 text-left">
+                    {c.label}
+                  </th>
+                ))}
+                <th className="px-2 py-2 text-left"> </th>
+              </tr>
+            </thead>
+            <tbody className="text-sm">
+              {rows.map((r: any[], ri: number) => (
+                <tr key={ri} className="border-t">
+                  {columns.map((c, ci) => (
+                    <td key={ci} className="px-2 py-2 align-top">
+                      {c.type === "textarea" ? (
+                        <Textarea
+                          defaultValue={r[ci]}
+                          onChange={(e) => setCell(ri, ci, e.target.value)}
+                          ref={autoGrow as any}
+                          className="min-h-[36px] resize-none whitespace-normal break-words leading-snug"
+                        />
+                      ) : c.type === "date" ? (
+                        <Input
+                          type="date"
+                          value={r[ci] || ""}
+                          onChange={(e) => setCell(ri, ci, e.target.value)}
+                          className="h-9"
+                        />
+                      ) : c.type === "number" ? (
+                        <Input
+                          type="number"
+                          value={String(r[ci] ?? 0)}
+                          onChange={(e) => setCell(ri, ci, Number(e.target.value || 0))}
+                          className="h-9"
+                        />
+                      ) : (
+                        <Input value={r[ci] || ""} onChange={(e) => setCell(ri, ci, e.target.value)} className="h-9" />
+                      )}
+                    </td>
+                  ))}
+                  <td className="px-2 py-2">
+                    <Button size="icon" variant="ghost" onClick={() => deleteRow(ri)}>
+                      <Trash2 className="h-4 w-4 text-red-600" />
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={columns.length + 1} className="px-3 py-8 text-center text-slate-500">
+                    No data yet. Click “Add Row”.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  const renderMeetings = () => {
+    const rows = current.meetings || [];
+    const setCell = (ri: number, ci: number, v: any) => {
+      updateProduct((p) => {
+        const next = (p.meetings || []).map((r: any[], i: number) => (i === ri ? r.map((c: any, j: number) => (j === ci ? v : c)) : r));
+        p.meetings = next;
+      });
+    };
+    const addRow = () => {
+      const row = [
+        `MEET-${Date.now()}`,
+        "New Meeting",
+        new Date().toISOString().split("T")[0],
+        "10:00",
+        "60",
+        "Attendees",
+        "Location",
+        "Agenda",
+        "Notes",
+        "Scheduled",
+      ];
+      updateProduct((p) => {
+        p.meetings = [...(p.meetings || []), row];
+      });
+    };
+    const deleteRow = (idx: number) =>
+      updateProduct((p) => {
+        p.meetings = (p.meetings || []).filter((_: any, i: number) => i !== idx);
+      });
+
+    return (
+      <div className="px-3 py-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Meetings</h2>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" className="gap-2" onClick={() => setShowMeetingModal(true)}>
+              <CalendarPlus2 className="h-4 w-4" />
+              Schedule Meeting
+            </Button>
+            <Button size="sm" onClick={addRow} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Add Row
+            </Button>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto rounded-md border">
+          <table className="min-w-[1200px] table-fixed">
+            <thead className="bg-slate-50 text-slate-700 text-xs uppercase">
+              <tr>
+                {["ID", "Title", "Date", "Time", "Duration (min)", "Attendees", "Location", "Agenda", "Notes", "Status", ""].map(
+                  (h) => (
+                    <th key={h} className="px-2 py-2 text-left">
+                      {h}
+                    </th>
+                  ),
+                )}
+              </tr>
+            </thead>
+            <tbody className="text-sm">
+              {rows.map((r: any[], ri: number) => (
+                <tr key={r[0]} className="border-t">
+                  <td className="px-2 py-2">{r[0]}</td>
+                  <td className="px-2 py-2">
+                    <Input value={r[1]} onChange={(e) => setCell(ri, 1, e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input type="date" value={r[2]} onChange={(e) => setCell(ri, 2, e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input value={r[3]} onChange={(e) => setCell(ri, 3, e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input type="number" value={r[4]} onChange={(e) => setCell(ri, 4, e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input value={r[5]} onChange={(e) => setCell(ri, 5, e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input value={r[6]} onChange={(e) => setCell(ri, 6, e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Textarea defaultValue={r[7]} onChange={(e) => setCell(ri, 7, e.target.value)} ref={autoGrow as any} />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Textarea defaultValue={r[8]} onChange={(e) => setCell(ri, 8, e.target.value)} ref={autoGrow as any} />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input value={r[9]} onChange={(e) => setCell(ri, 9, e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <div className="flex items-center gap-2">
+                      <Button size="sm" variant="outline" className="gap-2" onClick={() => exportMeetingSummary(r)}>
+                        <FileText className="h-4 w-4" />
+                        Export
+                      </Button>
+                      <Button size="icon" variant="ghost" onClick={() => deleteRow(ri)}>
+                        <Trash2 className="h-4 w-4 text-red-600" />
+                      </Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={11} className="px-3 py-8 text-center text-slate-500">
+                    No meetings. Click “Schedule Meeting” or “Add Row”.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Modal */}
+        {showMeetingModal && (
+          <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
+            <div className="w-full max-w-2xl rounded-xl bg-white shadow-lg">
+              <div className="flex items-center justify-between border-b px-4 py-3">
+                <h3 className="text-lg font-semibold">Schedule Meeting</h3>
+                <Button variant="ghost" onClick={() => setShowMeetingModal(false)}>
+                  Close
+                </Button>
+              </div>
+              <div className="grid gap-3 p-4 sm:grid-cols-2">
+                <div className="sm:col-span-2">
+                  <label className="text-sm text-slate-600">Title</label>
+                  <Input
+                    className="mt-1"
+                    value={meetingForm.title}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, title: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm text-slate-600">Date</label>
+                  <Input
+                    type="date"
+                    className="mt-1"
+                    value={meetingForm.date}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, date: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm text-slate-600">Time</label>
+                  <Input
+                    className="mt-1"
+                    value={meetingForm.time}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, time: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm text-slate-600">Duration (min)</label>
+                  <Input
+                    type="number"
+                    className="mt-1"
+                    value={meetingForm.duration}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, duration: e.target.value }))}
+                  />
+                </div>
+                <div>
+                  <label className="text-sm text-slate-600">Status</label>
+                  <Input
+                    className="mt-1"
+                    value={meetingForm.status}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, status: e.target.value }))}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-sm text-slate-600">Attendees</label>
+                  <Input
+                    className="mt-1"
+                    value={meetingForm.attendees}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, attendees: e.target.value }))}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-sm text-slate-600">Location</label>
+                  <Input
+                    className="mt-1"
+                    value={meetingForm.location}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, location: e.target.value }))}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-sm text-slate-600">Agenda</label>
+                  <Textarea
+                    className="mt-1"
+                    value={meetingForm.agenda}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, agenda: e.target.value }))}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="text-sm text-slate-600">Notes</label>
+                  <Textarea
+                    className="mt-1"
+                    value={meetingForm.notes}
+                    onChange={(e) => setMeetingForm((s) => ({ ...s, notes: e.target.value }))}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-end gap-2 border-t px-4 py-3">
+                <Button variant="ghost" onClick={() => setShowMeetingModal(false)}>
+                  Cancel
+                </Button>
+                <Button onClick={saveMeetingFromModal} className="gap-2">
+                  <CalendarPlus2 className="h-4 w-4" />
+                  Save Meeting
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderKPIs = () => {
+    const setVal = (i: number, key: keyof KPI, v: any) => {
+      setKpis((prev) => prev.map((k, idx) => (i === idx ? { ...k, [key]: v, updated_at: new Date().toISOString() } : k)));
+    };
+    const add = () =>
+      setKpis((prev) => [
+        ...prev,
+        {
+          id: `kpi-${Date.now()}`,
+          scenario_id: `scenario-${scenario}`,
+          name: "New KPI",
+          target_value: 100,
+          current_value: 0,
+          unit: "%",
+          owner: "Owner",
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+      ]);
+    const del = (i: number) => setKpis((prev) => prev.filter((_, idx) => idx !== i));
+
+    return (
+      <div className="px-3 py-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">KPIs</h2>
+          <Button size="sm" onClick={add} className="gap-2">
+            <Plus className="h-4 w-4" />
+            Add KPI
+          </Button>
+        </div>
+        <div className="overflow-x-auto rounded-md border">
+          <table className="min-w-[900px] table-fixed">
+            <thead className="bg-slate-50 text-slate-700 text-xs uppercase">
+              <tr>
+                <th className="px-2 py-2 text-left">Name</th>
+                <th className="px-2 py-2 text-left">Current</th>
+                <th className="px-2 py-2 text-left">Target</th>
+                <th className="px-2 py-2 text-left">Unit</th>
+                <th className="px-2 py-2 text-left">Owner</th>
+                <th className="px-2 py-2 text-left"> </th>
+              </tr>
+            </thead>
+            <tbody className="text-sm">
+              {kpis.map((k, i) => (
+                <tr key={k.id} className="border-t">
+                  <td className="px-2 py-2">
+                    <Input value={k.name} onChange={(e) => setVal(i, "name", e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input
+                      type="number"
+                      value={String(k.current_value)}
+                      onChange={(e) => setVal(i, "current_value", Number(e.target.value || 0))}
+                      className="h-9"
+                    />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input
+                      type="number"
+                      value={String(k.target_value)}
+                      onChange={(e) => setVal(i, "target_value", Number(e.target.value || 0))}
+                      className="h-9"
+                    />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input value={k.unit} onChange={(e) => setVal(i, "unit", e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Input value={k.owner} onChange={(e) => setVal(i, "owner", e.target.value)} className="h-9" />
+                  </td>
+                  <td className="px-2 py-2">
+                    <Button size="icon" variant="ghost" onClick={() => del(i)}>
+                      <Trash2 className="h-4 w-4 text-red-600" />
+                    </Button>
+                  </td>
+                </tr>
+              ))}
+              {kpis.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="px-3 py-8 text-center text-slate-500">
+                    No KPIs. Click “Add KPI”.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  // ---------- Page ----------
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="text-center space-y-3">
-          <div className="flex items-center justify-center gap-2">
-            <Loader2 className="h-5 w-5 animate-spin" />
-            <span>Loading dashboard…</span>
-          </div>
-          <div className="text-sm text-muted-foreground">If prompted, sign in first.</div>
+      <div className="flex min-h-[60vh] items-center justify-center">
+        <div className="flex items-center gap-2 text-slate-600">
+          <Loader2 className="h-5 w-5 animate-spin" />
+          Loading…
         </div>
       </div>
     );
   }
 
   return (
-    <div className="p-5 space-y-5">
-      {/* Top bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <select className="border rounded px-3 py-2 text-sm" value={scenario} onChange={(e) => setScenario(e.target.value as ScenarioKey)}>
-            <option value="50k">50k</option>
-            <option value="200k">200k</option>
-          </select>
-          <select className="border rounded px-3 py-2 text-sm" value={variant} onChange={(e) => setVariant(e.target.value as Variant)}>
-            <option>Recess Nanodispensing</option>
-            <option>Dipcoating</option>
-          </select>
-          <span className="text-xs text-slate-500">
-            {saving ? "Saving…" : `Last sync ${syncStatus.lastSync.toLocaleTimeString()} ${syncStatus.isOnline ? "✓" : "• offline"}`}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={exportWeeklySummary} className="gap-2">
-            <FileText className="h-4 w-4" />
-            Weekly Summary (TXT)
-          </Button>
-          <Button variant="default" size="sm" onClick={generateComprehensiveReportPDF} className="gap-2">
-            <TrendingUp className="h-4 w-4" />
-            Comprehensive Report (PDF)
-          </Button>
-          <Button variant="outline" size="sm" onClick={saveAll} className="gap-2">
-            <Save className="h-4 w-4" />
-            Save now
-          </Button>
-        </div>
-      </div>
+    <div className="min-h-screen">
+      {renderHeader()}
+      {renderTabs()}
+      {error && <div className="px-3 py-2 text-sm text-red-600">{error}</div>}
 
-      {/* Tabs */}
-      <div className="flex gap-2 flex-wrap">
-        {["Overview", "Projects", "Manufacturing", "Resources", "Risks", "Meetings", "KPIs", "Financials", "Glossary", "Config"].map((t) => (
-          <button
-            key={t}
-            onClick={() => setActiveTab(t as any)}
-            className={`text-sm px-3 py-1.5 rounded border ${activeTab === t ? "bg-slate-900 text-white" : "bg-white hover:bg-slate-50"}`}
-          >
-            {t}
-          </button>
-        ))}
-      </div>
-
-      {/* Overview */}
-      {activeTab === "Overview" && (
-        <div className="grid md:grid-cols-2 gap-4">
-          <div className="border rounded-lg p-4">
-            <div className="font-semibold mb-2">Production</div>
-            <div className="text-sm space-y-1">
-              <div>Target units/year: {scenarioCfg.unitsPerYear.toLocaleString()}</div>
-              <div>Capacity utilization: {overview.capacityUtil}%</div>
-            </div>
-          </div>
-          <div className="border rounded-lg p-4">
-            <div className="font-semibold mb-2">Projects</div>
-            <div className="text-sm space-y-1">
-              <div>Total: {overview.totalProjects}</div>
-              <div>Active: {overview.active}</div>
-              <div>Completed: {overview.completed}</div>
-              <div>At Risk: {overview.atRisk}</div>
-            </div>
-          </div>
-          <div className="border rounded-lg p-4">
-            <div className="font-semibold mb-2">KPIs</div>
-            <div className="text-sm">KPI Health: {overview.kpiHealth}%</div>
-          </div>
-          <div className="border rounded-lg p-4">
-            <div className="font-semibold mb-2">Resources</div>
-            <div className="text-sm">Total headcount (qty sum): {overview.totalResources}</div>
-          </div>
+      {tab === "overview" && (
+        <div className="px-3 py-4">
+          <h2 className="text-lg font-semibold">Overview</h2>
+          <p className="mt-2 text-sm text-slate-600">
+            Use the tabs above to manage Projects, Manufacturing, Resources, Risks, Meetings, KPIs, Financials, and Glossary.
+            All changes save automatically for your workspace.
+          </p>
         </div>
       )}
 
-      {/* Projects — reformatted widths to prevent cramped overlay */}
-      {activeTab === "Projects" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">Projects</div>
-            <Button size="sm" onClick={addProject} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Add Project
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            {/* Wider table to fit long text columns cleanly */}
-            <table className="min-w-[2200px] text-sm">
-              <colgroup>
-                <col width={110} />
-                <col width={260} />
-                <col width={130} />
-                <col width={110} />
-                <col width={170} />
-                <col width={130} />
-                <col width={130} />
-                <col width={100} />
-                <col width={260} />
-                <col width={300} />
-                <col width={60} />
-                <col width={60} />
-                <col width={60} />
-                <col width={60} />
-                <col width={220} />
-                <col width={220} />
-                <col width={180} />
-                <col width={140} />
-                <col width={140} />
-                <col width={120} />
-                <col width={160} />
-                <col width={90} />
-                <col width={120} />
-                <col width={110} />
-                <col width={80} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {[
-                    "id",
-                    "name",
-                    "type",
-                    "moscow",
-                    "owner",
-                    "start",
-                    "finish",
-                    "dependencies",
-                    "deliverables",
-                    "goal",
-                    "R",
-                    "A",
-                    "C",
-                    "I",
-                    "needs",
-                    "barriers",
-                    "risks",
-                    "budget_capex",
-                    "budget_opex",
-                    "percent_complete",
-                    "process_link",
-                    "critical",
-                    "status",
-                    "slack_days",
-                    "",
-                  ].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {projects.map((row, i) => (
-                  <tr key={i} className="border-b align-top">
-                    {row.map((cell: any, j: number) => (
-                      <td key={j} className="px-2 py-1">
-                        {j === 5 || j === 6 ? (
-                          <input
-                            type="date"
-                            className="w-full border rounded px-2 py-1"
-                            value={String(cell || "").slice(0, 10)}
-                            onChange={(e) => editProject(i, j, e.target.value)}
-                          />
-                        ) : j === 17 || j === 18 || j === 19 || j === 23 || j === 7 ? (
-                          <input
-                            className="w-full border rounded px-2 py-1"
-                            type="number"
-                            value={cell ?? 0}
-                            onChange={(e) => editProject(i, j, Number(e.target.value))}
-                          />
-                        ) : j === 8 || j === 9 || j === 14 || j === 15 || j === 16 || j === 20 ? (
-                          <textarea
-                            className="w-full border rounded px-2 py-1 min-h-[44px] resize-none"
-                            value={cell ?? ""}
-                            onChange={(e) => editProject(i, j, e.target.value)}
-                          />
-                        ) : (
-                          <input
-                            className="w-full border rounded px-2 py-1"
-                            value={cell ?? ""}
-                            onChange={(e) => editProject(i, j, e.target.value)}
-                          />
-                        )}
-                      </td>
-                    ))}
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteProject(i)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!projects.length && (
-                  <tr>
-                    <td colSpan={25} className="px-3 py-6 text-center text-slate-500">
-                      No projects yet. Click “Add Project”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === "projects" && renderProjects()}
 
-      {/* Manufacturing */}
-      {activeTab === "Manufacturing" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">Manufacturing</div>
-            <Button size="sm" onClick={addManufacturing} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Add Process
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            <table className="min-w-[1200px] text-sm">
-              <colgroup>
-                <col width={260} />
-                <col width={90} />
-                <col width={90} />
-                <col width={90} />
-                <col width={110} />
-                <col width={220} />
-                <col width={140} />
-                <col width={140} />
-                <col width={140} />
-                <col width={60} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {["Process", "Time (min)", "Batch Size", "Yield (%)", "Cycle Time (s)", "Equipment", "Type", "Status", "Owner", ""].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {manufacturing.map((r, i) => (
-                  <tr key={i} className="border-b">
-                    {r.map((c: any, j: number) => (
-                      <td key={j} className="px-2 py-1">
-                        {j === 1 || j === 2 || j === 3 || j === 4 ? (
-                          <input
-                            type="number"
-                            className="w-full border rounded px-2 py-1"
-                            value={c ?? 0}
-                            onChange={(e) => editManufacturing(i, j, Number(e.target.value))}
-                          />
-                        ) : j === 0 || j === 5 || j === 6 || j === 7 || j === 8 ? (
-                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editManufacturing(i, j, e.target.value)} />
-                        ) : (
-                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editManufacturing(i, j, e.target.value)} />
-                        )}
-                      </td>
-                    ))}
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteManufacturing(i)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!manufacturing.length && (
-                  <tr>
-                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
-                      No processes. Click “Add Process”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === "manufacturing" &&
+        simpleGrid("Manufacturing", "manufacturing", [
+          { label: "Process", type: "text" },
+          { label: "CT (min)", type: "number" },
+          { label: "Batch Size", type: "number" },
+          { label: "Yield (%)", type: "number" },
+          { label: "Cycle (s)", type: "number" },
+          { label: "Equipment", type: "text" },
+          { label: "Type", type: "text" },
+          { label: "Status", type: "text" },
+          { label: "Owner", type: "text" },
+        ])}
 
-      {/* Resources */}
-      {activeTab === "Resources" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">Resources</div>
-            <Button size="sm" onClick={addResource} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Add Resource
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            <table className="min-w-[1100px] text-sm">
-              <colgroup>
-                <col width={260} />
-                <col width={140} />
-                <col width={100} />
-                <col width={120} />
-                <col width={180} />
-                <col width={300} />
-                <col width={60} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {["Resource", "Type", "Qty", "Cost", "Department", "Notes", ""].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {resources.map((r, i) => (
-                  <tr key={i} className="border-b">
-                    {r.map((c: any, j: number) => (
-                      <td key={j} className="px-2 py-1">
-                        {j === 2 || j === 3 ? (
-                          <input type="number" className="w-full border rounded px-2 py-1" value={c ?? 0} onChange={(e) => editResource(i, j, Number(e.target.value))} />
-                        ) : j === 5 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={c ?? ""} onChange={(e) => editResource(i, j, e.target.value)} />
-                        ) : (
-                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editResource(i, j, e.target.value)} />
-                        )}
-                      </td>
-                    ))}
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteResource(i)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!resources.length && (
-                  <tr>
-                    <td colSpan={7} className="px-3 py-6 text-center text-slate-500">
-                      No resources. Click “Add Resource”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === "resources" &&
+        simpleGrid("Resources", "resources", [
+          { label: "Resource", type: "text" },
+          { label: "Type", type: "text" },
+          { label: "Qty", type: "number" },
+          { label: "Cost", type: "number" },
+          { label: "Department", type: "text" },
+          { label: "Notes", type: "textarea" },
+        ])}
 
-      {/* Risks */}
-      {activeTab === "Risks" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">Risks</div>
-            <Button size="sm" onClick={addRisk} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Add Risk
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            <table className="min-w-[1300px] text-sm">
-              <colgroup>
-                <col width={110} />
-                <col width={360} />
-                <col width={90} />
-                <col width={90} />
-                <col width={360} />
-                <col width={160} />
-                <col width={140} />
-                <col width={120} />
-                <col width={60} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {["id", "risk", "impact", "prob", "mitigation", "owner", "due", "status", ""].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {risks.map((r, i) => (
-                  <tr key={i} className="border-b align-top">
-                    {r.map((c: any, j: number) => (
-                      <td key={j} className="px-2 py-1">
-                        {j === 6 ? (
-                          <input type="date" className="w-full border rounded px-2 py-1" value={String(c || "").slice(0, 10)} onChange={(e) => editRisk(i, j, e.target.value)} />
-                        ) : j === 1 || j === 4 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={c ?? ""} onChange={(e) => editRisk(i, j, e.target.value)} />
-                        ) : (
-                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editRisk(i, j, e.target.value)} />
-                        )}
-                      </td>
-                    ))}
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteRisk(i)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!risks.length && (
-                  <tr>
-                    <td colSpan={9} className="px-3 py-6 text-center text-slate-500">
-                      No risks. Click “Add Risk”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === "risks" &&
+        simpleGrid("Risks", "risks", [
+          { label: "Title", type: "text" },
+          { label: "Impact", type: "text" },
+          { label: "Probability", type: "text" },
+          { label: "Mitigation", type: "textarea" },
+          { label: "Owner", type: "text" },
+          { label: "Status", type: "text" },
+        ])}
 
-      {/* Meetings — restored popup modal for scheduling/agenda/notes + exports */}
-      {activeTab === "Meetings" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">Project Meetings</div>
-            <Button size="sm" onClick={addMeeting} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Schedule Meeting
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            <table className="min-w-[1500px] text-sm">
-              <colgroup>
-                <col width={260} />
-                <col width={120} />
-                <col width={100} />
-                <col width={100} />
-                <col width={240} />
-                <col width={180} />
-                <col width={140} />
-                <col width={260} />
-                <col width={320} />
-                <col width={140} />
-                <col width={60} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes", "Actions", ""].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {meetings.map((r, i) => (
-                  <tr key={i} className="border-b align-top">
-                    {r.map((c: any, j: number) => (
-                      <td key={j} className="px-2 py-1">
-                        {j === 1 ? (
-                          <input type="date" className="w-full border rounded px-2 py-1" value={String(c || "").slice(0, 10)} onChange={(e) => editInlineMeeting(i, j, e.target.value)} />
-                        ) : j === 7 || j === 8 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[48px] resize-none" value={c ?? ""} onChange={(e) => editInlineMeeting(i, j, e.target.value)} />
-                        ) : (
-                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editInlineMeeting(i, j, e.target.value)} />
-                        )}
-                      </td>
-                    ))}
-                    <td className="px-2 py-1 whitespace-nowrap">
-                      <div className="flex gap-2">
-                        <Button variant="outline" size="sm" onClick={() => openMeetingModal(i)} className="gap-1">
-                          <Pencil className="h-4 w-4" /> Edit
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => exportMeetingPDF(meetings[i])} className="gap-1">
-                          <FileText className="h-4 w-4" /> PDF
-                        </Button>
-                        <Button variant="outline" size="sm" onClick={() => exportMeetingICS(meetings[i])}>
-                          ICS
-                        </Button>
-                      </div>
-                    </td>
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteMeeting(i)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!meetings.length && (
-                  <tr>
-                    <td colSpan={11} className="px-3 py-6 text-center text-slate-500">
-                      No meetings. Click “Schedule Meeting”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+      {tab === "meetings" && renderMeetings()}
 
-          {/* Modal */}
-          {meetingModalOpen && (
-            <div className="fixed inset-0 z-50">
-              <div className="absolute inset-0 bg-black/40" onClick={() => setMeetingModalOpen(false)} />
-              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-xl shadow-xl w-[800px] max-w-[95vw]">
-                <div className="p-5 border-b font-semibold">{meetingIdx === null ? "Schedule Meeting" : "Edit Meeting"}</div>
-                <div className="p-5 space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="text-sm">
-                      Title
-                      <input
-                        className="w-full border rounded px-2 py-1 mt-1"
-                        value={meetingDraft[0] || ""}
-                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 0: e.target.value }))}
-                      />
-                    </label>
-                    <label className="text-sm">
-                      Date
-                      <input
-                        type="date"
-                        className="w-full border rounded px-2 py-1 mt-1"
-                        value={String(meetingDraft[1] || "").slice(0, 10)}
-                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 1: e.target.value }))}
-                      />
-                    </label>
-                    <label className="text-sm">
-                      Time
-                      <input
-                        className="w-full border rounded px-2 py-1 mt-1"
-                        value={meetingDraft[2] || ""}
-                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 2: e.target.value }))}
-                      />
-                    </label>
-                    <label className="text-sm">
-                      Duration
-                      <input
-                        className="w-full border rounded px-2 py-1 mt-1"
-                        value={meetingDraft[3] || ""}
-                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 3: e.target.value }))}
-                      />
-                    </label>
-                    <label className="text-sm">
-                      Attendees
-                      <input
-                        className="w-full border rounded px-2 py-1 mt-1"
-                        value={meetingDraft[4] || ""}
-                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 4: e.target.value }))}
-                      />
-                    </label>
-                    <label className="text-sm">
-                      Location
-                      <input
-                        className="w-full border rounded px-2 py-1 mt-1"
-                        value={meetingDraft[5] || ""}
-                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 5: e.target.value }))}
-                      />
-                    </label>
-                    <label className="text-sm col-span-2">
-                      Status
-                      <input
-                        className="w-full border rounded px-2 py-1 mt-1"
-                        value={meetingDraft[6] || ""}
-                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 6: e.target.value }))}
-                      />
-                    </label>
-                  </div>
-                  <label className="text-sm block">
-                    Agenda
-                    <textarea
-                      className="w-full border rounded px-2 py-2 mt-1 min-h-[90px] resize-none"
-                      value={meetingDraft[7] || ""}
-                      onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 7: e.target.value }))}
-                    />
-                  </label>
-                  <label className="text-sm block">
-                    Notes
-                    <textarea
-                      className="w-full border rounded px-2 py-2 mt-1 min-h-[120px] resize-none"
-                      value={meetingDraft[8] || ""}
-                      onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 8: e.target.value }))}
-                    />
-                  </label>
-                </div>
-                <div className="p-4 border-t flex justify-between">
-                  <div className="flex gap-2">
-                    <Button variant="outline" onClick={() => exportMeetingPDF(meetingDraft)} className="gap-2">
-                      <FileText className="h-4 w-4" />
-                      Export PDF
-                    </Button>
-                    <Button variant="outline" onClick={() => exportMeetingICS(meetingDraft)}>
-                      Export ICS
-                    </Button>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" onClick={() => setMeetingModalOpen(false)}>
-                      Cancel
-                    </Button>
-                    <Button onClick={saveMeetingFromModal}>Save Meeting</Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+      {tab === "kpis" && renderKPIs()}
 
-      {/* KPIs */}
-      {activeTab === "KPIs" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">KPIs</div>
-            <Button size="sm" onClick={addKPI} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Add KPI
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            <table className="min-w-[1000px] text-sm">
-              <colgroup>
-                <col width={300} />
-                <col width={140} />
-                <col width={140} />
-                <col width={100} />
-                <col width={220} />
-                <col width={60} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {["Name", "Current Value", "Target Value", "Unit", "Owner", ""].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {kpis.map((k) => (
-                  <tr key={k.id} className="border-b">
-                    <td className="px-2 py-1">
-                      <input className="w-full border rounded px-2 py-1" value={k.name} onChange={(e) => editKPI(k.id, "name", e.target.value)} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <input type="number" className="w-full border rounded px-2 py-1" value={k.current_value} onChange={(e) => editKPI(k.id, "current_value", Number(e.target.value))} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <input type="number" className="w-full border rounded px-2 py-1" value={k.target_value} onChange={(e) => editKPI(k.id, "target_value", Number(e.target.value))} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <input className="w-full border rounded px-2 py-1" value={k.unit} onChange={(e) => editKPI(k.id, "unit", e.target.value)} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <input className="w-full border rounded px-2 py-1" value={k.owner} onChange={(e) => editKPI(k.id, "owner", e.target.value)} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteKPI(k.id)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!kpis.length && (
-                  <tr>
-                    <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
-                      No KPIs. Click “Add KPI”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === "financials" &&
+        simpleGrid("Financials", "financials", [
+          { label: "Category", type: "text" },
+          { label: "Item", type: "text" },
+          { label: "Amount", type: "number" },
+          { label: "Type", type: "text" },
+          { label: "Notes", type: "textarea" },
+        ])}
 
-      {/* Financials */}
-      {activeTab === "Financials" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">Financials</div>
-            <Button size="sm" onClick={addFinancial} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Add Row
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            <table className="min-w-[1100px] text-sm">
-              <colgroup>
-                <col width={180} />
-                <col width={320} />
-                <col width={120} />
-                <col width={160} />
-                <col width={320} />
-                <col width={60} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {["Category", "Item", "Amount", "Type", "Notes", ""].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {financials.map((r, i) => (
-                  <tr key={i} className="border-b">
-                    {r.map((c: any, j: number) => (
-                      <td key={j} className="px-2 py-1">
-                        {j === 2 ? (
-                          <input type="number" className="w-full border rounded px-2 py-1" value={c ?? 0} onChange={(e) => editFinancial(i, j, Number(e.target.value))} />
-                        ) : j === 4 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={c ?? ""} onChange={(e) => editFinancial(i, j, e.target.value)} />
-                        ) : (
-                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editFinancial(i, j, e.target.value)} />
-                        )}
-                      </td>
-                    ))}
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteFinancial(i)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!financials.length && (
-                  <tr>
-                    <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
-                      No financial rows. Click “Add Row”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {tab === "glossary" &&
+        simpleGrid("Glossary", "glossary", [
+          { label: "Term", type: "text" },
+          { label: "Definition", type: "textarea" },
+        ])}
 
-      {/* Glossary */}
-      {activeTab === "Glossary" && (
-        <div className="space-y-3">
-          <div className="flex justify-between items-center">
-            <div className="font-semibold">Glossary</div>
-            <Button size="sm" onClick={addGlossary} className="gap-2">
-              <Plus className="h-4 w-4" />
-              Add Term
-            </Button>
-          </div>
-          <div className="overflow-auto border rounded-lg">
-            <table className="min-w-[1000px] text-sm">
-              <colgroup>
-                <col width={280} />
-                <col width={680} />
-                <col width={60} />
-              </colgroup>
-              <thead className="bg-slate-50 text-slate-600">
-                <tr>
-                  {["Term", "Definition", ""].map((h) => (
-                    <th key={h} className="text-left px-2 py-2 border-b">
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {glossary.map((r, i) => (
-                  <tr key={i} className="border-b">
-                    <td className="px-2 py-1">
-                      <input className="w-full border rounded px-2 py-1" value={r?.[0] ?? ""} onChange={(e) => editGlossary(i, 0, e.target.value)} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={r?.[1] ?? ""} onChange={(e) => editGlossary(i, 1, e.target.value)} />
-                    </td>
-                    <td className="px-2 py-1">
-                      <Button variant="destructive" size="icon" onClick={() => deleteGlossary(i)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-                {!glossary.length && (
-                  <tr>
-                    <td colSpan={3} className="px-3 py-6 text-center text-slate-500">
-                      No terms. Click “Add Term”.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Config */}
-      {activeTab === "Config" && (
-        <div className="space-y-4">
-          <div className="font-semibold">Configuration</div>
-          <div className="grid md:grid-cols-2 gap-4">
-            <div className="border rounded-lg p-4 space-y-3">
-              <div className="text-sm text-slate-600">Scenario settings ({scenario})</div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="text-sm">
-                  Units/year
-                  <input
-                    type="number"
-                    className="w-full border rounded px-2 py-1 mt-1"
-                    value={scenarioCfg.unitsPerYear}
-                    onChange={(e) =>
-                      setPlan((prev: any) => ({
-                        ...prev,
-                        scenarios: { ...prev.scenarios, [scenario]: { ...prev.scenarios[scenario], unitsPerYear: Number(e.target.value) } },
-                      }))
-                    }
-                  />
-                </label>
-                <label className="text-sm">
-                  Hours/day
-                  <input
-                    type="number"
-                    className="w-full border rounded px-2 py-1 mt-1"
-                    value={scenarioCfg.hoursPerDay}
-                    onChange={(e) =>
-                      setPlan((prev: any) => ({
-                        ...prev,
-                        scenarios: { ...prev.scenarios, [scenario]: { ...prev.scenarios[scenario], hoursPerDay: Number(e.target.value) } },
-                      }))
-                    }
-                  />
-                </label>
-                <label className="text-sm">
-                  Shifts
-                  <input
-                    type="number"
-                    className="w-full border rounded px-2 py-1 mt-1"
-                    value={scenarioCfg.shifts}
-                    onChange={(e) =>
-                      setPlan((prev: any) => ({
-                        ...prev,
-                        scenarios: { ...prev.scenarios, [scenario]: { ...prev.scenarios[scenario], shifts: Number(e.target.value) } },
-                      }))
-                    }
-                  />
-                </label>
-              </div>
-            </div>
-            <div className="border rounded-lg p-4">
-              <div className="text-sm text-slate-600 mb-2">Actions</div>
-              <div className="flex gap-2">
-                <Button variant="outline" onClick={saveAll} className="gap-2">
-                  <Save className="h-4 w-4" />
-                  Save now
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    if (confirm("Reset to seed plan? This will overwrite local, unsaved edits.")) {
-                      const p = clone(SEED_PLAN);
-                      setPlan(p);
-                      setProjects([]);
-                      setManufacturing([]);
-                      setResources([]);
-                      setRisks([]);
-                      setMeetings([]);
-                      setKpis([]);
-                      setFinancials([]);
-                      setGlossary([]);
-                    }
-                  }}
-                >
-                  Reset to seed
-                </Button>
-              </div>
-            </div>
-          </div>
-          {error && <div className="text-red-600 text-sm">Error: {error}</div>}
+      {tab === "config" && (
+        <div className="px-3 py-4">
+          <h2 className="text-lg font-semibold">Config</h2>
+          <p className="mt-2 text-sm text-slate-600">
+            Column widths are saved automatically. Drag the right edge of a column header in Projects to resize it. All other tabs
+            support add/delete rows and autosave.
+          </p>
         </div>
       )}
     </div>
