@@ -2,12 +2,12 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Loader2, Plus, Trash2, Save, FileText, TrendingUp } from "lucide-react";
+import { FileText, Loader2, Plus, Save, Trash2, TrendingUp, Pencil } from "lucide-react";
+import jsPDF from "jspdf";
 import { generateWeeklySummary } from "@/lib/utils";
 import { clone, SEED_PLAN } from "@/lib/constants";
-import jsPDF from "jspdf";
 
-/** ----------------------------- Types ----------------------------- */
+/** =========================== Types =========================== */
 type Variant = "Recess Nanodispensing" | "Dipcoating";
 type ScenarioKey = "50k" | "200k";
 
@@ -30,28 +30,27 @@ interface SyncStatus {
   connectedUsers: number;
 }
 
-/** --------------------------- Utilities --------------------------- */
-const ensureArray = (val: any): any[] => (Array.isArray(val) ? val : Array.isArray(val?.data) ? val.data : []);
+/** ======================= Small Utilities ===================== */
+const ensureArray = (v: any): any[] => (Array.isArray(v) ? v : Array.isArray(v?.data) ? v.data : []);
 const currency = (n: any) => {
   const num = Number(n || 0);
   return isFinite(num) ? `$${num.toLocaleString()}` : "$0";
 };
 
-/** --------------------------- Component --------------------------- */
+/** ======================= Main Component ====================== */
 export default function ScaleUpDashboard() {
-  /** ------------------ Core state & derived values ------------------ */
+  /** -------- Core App State -------- */
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<
     "Overview" | "Projects" | "Manufacturing" | "Resources" | "Risks" | "Meetings" | "KPIs" | "Financials" | "Glossary" | "Config"
-  >("Overview");
+  >("Projects");
 
   const [scenario, setScenario] = useState<ScenarioKey>("50k");
   const [variant, setVariant] = useState<Variant>("Recess Nanodispensing");
 
-  // master plan structure similar to previous versions
   const [plan, setPlan] = useState<any>(() => {
     const p = clone(SEED_PLAN);
     if (!p.scenarios) {
@@ -62,23 +61,24 @@ export default function ScaleUpDashboard() {
     }
     if (!p.products) {
       p.products = {
-        "50k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], capex50k: [], opex50k: [], capex200k: [], opex200k: [], processes: [], kpis: [], costData: [] },
-        "200k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], capex50k: [], opex50k: [], capex200k: [], opex200k: [], processes: [], kpis: [], costData: [] },
+        "50k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], kpis: [] },
+        "200k": { projects: [], manufacturing: [], resources: [], risks: [], meetings: [], kpis: [] },
       };
     }
     return p;
   });
 
-  // per-tab flat states (easier editing)
+  /** -------- Tab Data (flat states) -------- */
   const [projects, setProjects] = useState<any[][]>([]);
   const [manufacturing, setManufacturing] = useState<any[][]>([]);
   const [resources, setResources] = useState<any[][]>([]);
   const [risks, setRisks] = useState<any[][]>([]);
   const [meetings, setMeetings] = useState<any[][]>([]);
   const [kpis, setKpis] = useState<KPI[]>([]);
-  const [financials, setFinancials] = useState<any[][]>([]); // [["Category","Item",Amount,"Type","Notes"]]
+  const [financials, setFinancials] = useState<any[][]>([]);
   const [glossary, setGlossary] = useState<any[][]>([]);
 
+  /** -------- Sync Status -------- */
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({
     isOnline: true,
     lastSync: new Date(),
@@ -86,53 +86,148 @@ export default function ScaleUpDashboard() {
     connectedUsers: 1,
   });
 
-  /** ---------------------- Load from Supabase ---------------------- */
+  /** -------- Meeting Modal -------- */
+  const [meetingModalOpen, setMeetingModalOpen] = useState(false);
+  const [meetingIdx, setMeetingIdx] = useState<number | null>(null);
+  const [meetingDraft, setMeetingDraft] = useState<any[]>([
+    "Weekly Status",
+    new Date().toISOString().slice(0, 10),
+    "10:00",
+    "60 min",
+    "Team",
+    "Room A",
+    "Scheduled",
+    "1) Updates\n2) Risks\n3) Decisions",
+    "",
+  ]);
+
+  const openMeetingModal = (idx: number | null) => {
+    if (idx === null) {
+      setMeetingDraft(["Weekly Status", new Date().toISOString().slice(0, 10), "10:00", "60 min", "Team", "Room A", "Scheduled", "", ""]);
+      setMeetingIdx(null);
+    } else {
+      setMeetingDraft([...(meetings[idx] || meetingDraft)]);
+      setMeetingIdx(idx);
+    }
+    setMeetingModalOpen(true);
+  };
+
+  const saveMeetingFromModal = () => {
+    if (meetingIdx === null) {
+      setMeetings((prev) => [...prev, [...meetingDraft]]);
+    } else {
+      setMeetings((prev) => {
+        const n = [...prev];
+        n[meetingIdx] = [...meetingDraft];
+        return n;
+      });
+    }
+    setMeetingModalOpen(false);
+  };
+
+  const exportMeetingPDF = (mtg: any[]) => {
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const M = 40;
+    let y = M;
+
+    const add = (t: string, bold = false) => {
+      doc.setFont("helvetica", bold ? "bold" : "normal");
+      doc.setFontSize(bold ? 14 : 11);
+      const lines = doc.splitTextToSize(t, 595 - 2 * M);
+      lines.forEach((ln: string) => {
+        if (y > 800) {
+          doc.addPage();
+          y = M;
+        }
+        doc.text(ln, M, y);
+        y += 16;
+      });
+      y += 4;
+    };
+
+    add("VitalTrace – Meeting Summary", true);
+    add(`Title: ${mtg[0]}`);
+    add(`Date: ${mtg[1]}   Time: ${mtg[2]}   Duration: ${mtg[3]}`);
+    add(`Attendees: ${mtg[4]}`);
+    add(`Location: ${mtg[5]}`);
+    add(`Status: ${mtg[6]}`);
+    add("Agenda:", true);
+    add(mtg[7] || "—");
+    add("Notes:", true);
+    add(mtg[8] || "—");
+
+    doc.save(`Meeting_${(mtg[0] || "Summary").replace(/\s+/g, "_")}_${mtg[1]}.pdf`);
+  };
+
+  const exportMeetingICS = (mtg: any[]) => {
+    const DTSTART = `${mtg[1]?.replace(/-/g, "")}T${(mtg[2] || "10:00").replace(":", "")}00`;
+    const UID = `${Date.now()}@vitaltrace`;
+    const ics = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//VitalTrace//Meeting//EN",
+      "CALSCALE:GREGORIAN",
+      "METHOD:PUBLISH",
+      "BEGIN:VEVENT",
+      `UID:${UID}`,
+      `DTSTAMP:${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`,
+      `DTSTART:${DTSTART}`,
+      `SUMMARY:${mtg[0] || "Meeting"}`,
+      `DESCRIPTION:${(mtg[7] || "")}\nNotes:${mtg[8] || ""}`.replace(/\n/g, "\\n"),
+      `LOCATION:${mtg[5] || ""}`,
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+
+    const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement("a"), {
+      href: url,
+      download: `Meeting_${(mtg[0] || "Event").replace(/\s+/g, "_")}.ics`,
+    });
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /** -------- Load saved data -------- */
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
         setError(null);
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 12000);
+        const to = setTimeout(() => controller.abort(), 12000);
         const res = await fetch("/api/configurations", { signal: controller.signal });
-        clearTimeout(timeoutId);
+        clearTimeout(to);
 
         if (!res.ok) {
           if (res.status === 401) {
             setError("Please sign in to load and save your dashboard data.");
           } else {
-            setError(`Failed to load data: ${res.statusText}`);
+            setError(`Failed to load: ${res.statusText}`);
           }
           setLoading(false);
           return;
         }
 
         const rows = await res.json();
-        const latest = Array.isArray(rows)
-          ? rows.find((r: any) => r.name === "ScaleUp-Dashboard-Config") ?? rows[0]
-          : null;
+        const latest = Array.isArray(rows) ? rows.find((r: any) => r.name === "ScaleUp-Dashboard-Config") ?? rows[0] : null;
 
         if (latest?.data) {
-          const data = latest.data;
-          setPlan(data.plan ?? plan);
-          setScenario(data.scenario ?? scenario);
-          setVariant(data.variant ?? variant);
+          const d = latest.data;
+          setPlan(d.plan ?? plan);
+          setScenario(d.scenario ?? scenario);
+          setVariant(d.variant ?? variant);
 
-          const prod = data.plan?.products?.[data.scenario ?? scenario] ?? {};
+          const prod = d.plan?.products?.[d.scenario ?? scenario] ?? {};
           setProjects(ensureArray(prod.projects));
           setManufacturing(ensureArray(prod.manufacturing));
           setResources(ensureArray(prod.resources));
           setRisks(ensureArray(prod.risks));
           setMeetings(ensureArray(prod.meetings));
-          setFinancials(
-            ensureArray(data.financials?.[data.scenario ?? scenario])?.length
-              ? ensureArray(data.financials?.[data.scenario ?? scenario])
-              : ensureArray(data.financials) // fallback older shape
-          );
-          setGlossary(ensureArray(data.glossary));
-          setKpis(Array.isArray(data.kpis) ? data.kpis : ensureArray(prod.kpis));
-        } else {
-          // keep defaults
+          setKpis(Array.isArray(d.kpis) ? d.kpis : ensureArray(prod.kpis));
+          setFinancials(ensureArray(d.financials?.[d.scenario ?? scenario]) || ensureArray(d.financials));
+          setGlossary(ensureArray(d.glossary));
         }
       } catch (e: any) {
         setError(e?.message ?? "Failed to load data.");
@@ -143,7 +238,7 @@ export default function ScaleUpDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /** ---------------------------- Autosave ---------------------------- */
+  /** -------- Autosave -------- */
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scheduleSave = useCallback(() => {
@@ -151,13 +246,12 @@ export default function ScaleUpDashboard() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(async () => {
       await saveAll();
-    }, 1500);
+    }, 1400);
   }, []);
 
   const saveAll = useCallback(async () => {
     try {
       setSaving(true);
-      // fold tab states back into plan
       setPlan((prev: any) => {
         const next = { ...prev, products: { ...prev.products } };
         next.products[scenario] = {
@@ -169,7 +263,6 @@ export default function ScaleUpDashboard() {
           meetings,
           kpis,
         };
-        // pack financials and glossary at top level of payload to keep compatibility
         const payload = {
           plan: next,
           scenario,
@@ -178,7 +271,6 @@ export default function ScaleUpDashboard() {
           glossary,
           lastSaved: new Date().toISOString(),
         };
-        // fire-and-forget actual POST
         (async () => {
           const res = await fetch("/api/configurations", {
             method: "POST",
@@ -193,8 +285,7 @@ export default function ScaleUpDashboard() {
           });
           if (!res.ok) {
             const j = await res.json().catch(() => ({}));
-            console.error("Save failed:", res.status, j?.error);
-            setError(j?.error ?? `Save failed with ${res.status}`);
+            setError(j?.error ?? `Save failed (${res.status})`);
             setSyncStatus((s) => ({ ...s, isOnline: false }));
           } else {
             setError(null);
@@ -205,7 +296,6 @@ export default function ScaleUpDashboard() {
         return next;
       });
     } catch (e: any) {
-      console.error(e);
       setSaving(false);
       setSyncStatus((s) => ({ ...s, isOnline: false }));
       setError(e?.message ?? "Failed to save.");
@@ -213,13 +303,12 @@ export default function ScaleUpDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, manufacturing, resources, risks, meetings, kpis, financials, glossary, scenario, variant]);
 
-  // schedule save when any tab state changes
   useEffect(() => {
     if (!loading) scheduleSave();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects, manufacturing, resources, risks, meetings, kpis, financials, glossary, scenario, variant, loading]);
 
-  /** --------------------- Derived overview metrics --------------------- */
+  /** -------- Overview metrics -------- */
   const scenarioCfg =
     plan?.scenarios?.[scenario] ?? (scenario === "50k" ? { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 } : { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 });
 
@@ -233,7 +322,6 @@ export default function ScaleUpDashboard() {
       kpis.length > 0
         ? Math.round((kpis.filter((k) => k.current_value >= k.target_value * 0.9).length / kpis.length) * 100)
         : 85;
-
     return {
       totalProjects,
       active,
@@ -241,13 +329,11 @@ export default function ScaleUpDashboard() {
       atRisk,
       totalResources,
       kpiHealth,
-      capacityUtil: Math.round(
-        (scenarioCfg.unitsPerYear / (scenario === "50k" ? 60000 : 250000)) * 100
-      ),
+      capacityUtil: Math.round((scenarioCfg.unitsPerYear / (scenario === "50k" ? 60000 : 250000)) * 100),
     };
   }, [projects, resources, kpis, scenario, scenarioCfg]);
 
-  /** ----------------------- Weekly TXT export ----------------------- */
+  /** -------- Weekly TXT -------- */
   const exportWeeklySummary = () => {
     const sum = generateWeeklySummary?.() ?? {
       week: new Date().toISOString().slice(0, 10),
@@ -280,16 +366,22 @@ ${sum.keyMilestones.map((m: string) => `• ${m}`).join("\n") || "• —"}
 ${sum.criticalIssues.map((m: string) => `• ${m}`).join("\n") || "• —"}
 
 📈 KPI PERFORMANCE
-${sum.kpiSummary
-  .map((k: any) => `• ${k.name}: ${k.current}/${k.target} ${k.trend === "up" ? "↗" : k.trend === "down" ? "↘" : "→"}`)
-  .join("\n") || "• —"}
+${
+  sum.kpiSummary?.length
+    ? sum.kpiSummary
+        .map(
+          (k: any) => `• ${k.name}: ${k.current}/${k.target} ${k.trend === "up" ? "↗" : k.trend === "down" ? "↘" : "→"}`
+        )
+        .join("\n")
+    : "• —"
+}
 
 🚀 NEXT WEEK PRIORITIES
 ${sum.nextWeekPriorities.map((m: string) => `• ${m}`).join("\n") || "• —"}
 
 ═══════════════════════════════════════════════════════════════
 Generated: ${new Date().toLocaleString()}
-Dashboard Version: v65
+Dashboard Version: v66
     `.trim();
 
     const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
@@ -301,7 +393,7 @@ Dashboard Version: v65
     URL.revokeObjectURL(url);
   };
 
-  /** ------------------- Comprehensive PDF export ------------------- */
+  /** -------- Comprehensive PDF -------- */
   const generateComprehensiveReportPDF = () => {
     const PAGE_W = 595;
     const PAGE_H = 842;
@@ -411,19 +503,14 @@ Dashboard Version: v65
     // KPIs
     title("KPIs");
     if (!kpis.length) addWrapped("• No KPIs defined.");
-    kpis.forEach((k) => {
-      addWrapped(`• ${k.name}: ${k.current_value}${k.unit} / ${k.target_value}${k.unit} — Owner: ${k.owner || "—"}`);
-    });
+    kpis.forEach((k) => addWrapped(`• ${k.name}: ${k.current_value}${k.unit} / ${k.target_value}${k.unit} — Owner: ${k.owner || "—"}`));
 
-    ensureSpace(28);
-    hr();
-    doc.setFontSize(9);
-    doc.text(`End of report • Scenario ${scenario} • Variant ${variant}`, M, y);
+    addWrapped(`\n\nEnd of report • Scenario ${scenario} • Variant ${variant}`);
     doc.save(`VitalTrace_Comprehensive_Report_${variant}_${scenario}.pdf`);
   };
 
-  /** ----------------------- Row helpers (tabs) ----------------------- */
-  const addProject = () => {
+  /** ========================= Row Helpers ========================= */
+  const addProject = () =>
     setProjects((prev) => [
       ...prev,
       [
@@ -453,7 +540,6 @@ Dashboard Version: v65
         0,
       ],
     ]);
-  };
   const deleteProject = (i: number) => setProjects((prev) => prev.filter((_, idx) => idx !== i));
   const editProject = (i: number, j: number, v: any) =>
     setProjects((prev) => {
@@ -495,13 +581,9 @@ Dashboard Version: v65
       return n;
     });
 
-  const addMeeting = () =>
-    setMeetings((prev) => [
-      ...prev,
-      ["Weekly Status", new Date().toISOString().slice(0, 10), "10:00", "60 min", "Team", "Room A", "Scheduled", "1) Updates\n2) Risks", ""],
-    ]);
+  const addMeeting = () => openMeetingModal(null);
   const deleteMeeting = (i: number) => setMeetings((prev) => prev.filter((_, idx) => idx !== i));
-  const editMeeting = (i: number, j: number, v: any) =>
+  const editInlineMeeting = (i: number, j: number, v: any) =>
     setMeetings((prev) => {
       const n = [...prev];
       n[i] = [...n[i]];
@@ -550,7 +632,7 @@ Dashboard Version: v65
       return n;
     });
 
-  /** ------------------------------ UI ------------------------------ */
+  /** ============================ UI ============================ */
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -559,7 +641,7 @@ Dashboard Version: v65
             <Loader2 className="h-5 w-5 animate-spin" />
             <span>Loading dashboard…</span>
           </div>
-          <div className="text-sm text-muted-foreground">If prompted, sign in to your Supabase-authenticated app.</div>
+          <div className="text-sm text-muted-foreground">If prompted, sign in first.</div>
         </div>
       </div>
     );
@@ -570,28 +652,18 @@ Dashboard Version: v65
       {/* Top bar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <select
-            className="border rounded px-3 py-2 text-sm"
-            value={scenario}
-            onChange={(e) => setScenario(e.target.value as ScenarioKey)}
-          >
+          <select className="border rounded px-3 py-2 text-sm" value={scenario} onChange={(e) => setScenario(e.target.value as ScenarioKey)}>
             <option value="50k">50k</option>
             <option value="200k">200k</option>
           </select>
-          <select
-            className="border rounded px-3 py-2 text-sm"
-            value={variant}
-            onChange={(e) => setVariant(e.target.value as Variant)}
-          >
+          <select className="border rounded px-3 py-2 text-sm" value={variant} onChange={(e) => setVariant(e.target.value as Variant)}>
             <option>Recess Nanodispensing</option>
             <option>Dipcoating</option>
           </select>
-
           <span className="text-xs text-slate-500">
             {saving ? "Saving…" : `Last sync ${syncStatus.lastSync.toLocaleTimeString()} ${syncStatus.isOnline ? "✓" : "• offline"}`}
           </span>
         </div>
-
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={exportWeeklySummary} className="gap-2">
             <FileText className="h-4 w-4" />
@@ -621,7 +693,7 @@ Dashboard Version: v65
         ))}
       </div>
 
-      {/* Content */}
+      {/* Overview */}
       {activeTab === "Overview" && (
         <div className="grid md:grid-cols-2 gap-4">
           <div className="border rounded-lg p-4">
@@ -651,6 +723,7 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Projects — reformatted widths to prevent cramped overlay */}
       {activeTab === "Projects" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
@@ -661,33 +734,34 @@ Dashboard Version: v65
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1600px] text-sm">
+            {/* Wider table to fit long text columns cleanly */}
+            <table className="min-w-[2200px] text-sm">
               <colgroup>
-                <col width={90} />
-                <col width={220} />
-                <col width={120} />
-                <col width={100} />
-                <col width={160} />
-                <col width={120} />
-                <col width={120} />
-                <col width={80} />
-                <col width={230} />
+                <col width={110} />
                 <col width={260} />
-                <col width={50} />
-                <col width={50} />
-                <col width={50} />
-                <col width={50} />
-                <col width={160} />
-                <col width={160} />
+                <col width={130} />
+                <col width={110} />
+                <col width={170} />
+                <col width={130} />
+                <col width={130} />
+                <col width={100} />
+                <col width={260} />
+                <col width={300} />
+                <col width={60} />
+                <col width={60} />
+                <col width={60} />
+                <col width={60} />
+                <col width={220} />
+                <col width={220} />
+                <col width={180} />
+                <col width={140} />
+                <col width={140} />
                 <col width={120} />
-                <col width={120} />
+                <col width={160} />
+                <col width={90} />
                 <col width={120} />
                 <col width={110} />
-                <col width={120} />
                 <col width={80} />
-                <col width={100} />
-                <col width={90} />
-                <col width={60} />
               </colgroup>
               <thead className="bg-slate-50 text-slate-600">
                 <tr>
@@ -745,7 +819,7 @@ Dashboard Version: v65
                           />
                         ) : j === 8 || j === 9 || j === 14 || j === 15 || j === 16 || j === 20 ? (
                           <textarea
-                            className="w-full border rounded px-2 py-1 min-h-[38px]"
+                            className="w-full border rounded px-2 py-1 min-h-[44px] resize-none"
                             value={cell ?? ""}
                             onChange={(e) => editProject(i, j, e.target.value)}
                           />
@@ -778,6 +852,7 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Manufacturing */}
       {activeTab === "Manufacturing" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
@@ -788,14 +863,14 @@ Dashboard Version: v65
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1200px] text-sm">
+            <table className="min-w-[1200px] text-sm">
               <colgroup>
-                <col width={240} />
+                <col width={260} />
                 <col width={90} />
                 <col width={90} />
                 <col width={90} />
                 <col width={110} />
-                <col width={200} />
+                <col width={220} />
                 <col width={140} />
                 <col width={140} />
                 <col width={140} />
@@ -823,11 +898,7 @@ Dashboard Version: v65
                             onChange={(e) => editManufacturing(i, j, Number(e.target.value))}
                           />
                         ) : j === 0 || j === 5 || j === 6 || j === 7 || j === 8 ? (
-                          <input
-                            className="w-full border rounded px-2 py-1"
-                            value={c ?? ""}
-                            onChange={(e) => editManufacturing(i, j, e.target.value)}
-                          />
+                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editManufacturing(i, j, e.target.value)} />
                         ) : (
                           <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editManufacturing(i, j, e.target.value)} />
                         )}
@@ -853,6 +924,7 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Resources */}
       {activeTab === "Resources" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
@@ -863,14 +935,14 @@ Dashboard Version: v65
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1000px] text-sm">
+            <table className="min-w-[1100px] text-sm">
               <colgroup>
-                <col width={240} />
+                <col width={260} />
                 <col width={140} />
                 <col width={100} />
                 <col width={120} />
-                <col width={160} />
-                <col width={260} />
+                <col width={180} />
+                <col width={300} />
                 <col width={60} />
               </colgroup>
               <thead className="bg-slate-50 text-slate-600">
@@ -888,14 +960,9 @@ Dashboard Version: v65
                     {r.map((c: any, j: number) => (
                       <td key={j} className="px-2 py-1">
                         {j === 2 || j === 3 ? (
-                          <input
-                            type="number"
-                            className="w-full border rounded px-2 py-1"
-                            value={c ?? 0}
-                            onChange={(e) => editResource(i, j, Number(e.target.value))}
-                          />
+                          <input type="number" className="w-full border rounded px-2 py-1" value={c ?? 0} onChange={(e) => editResource(i, j, Number(e.target.value))} />
                         ) : j === 5 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={c ?? ""} onChange={(e) => editResource(i, j, e.target.value)} />
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={c ?? ""} onChange={(e) => editResource(i, j, e.target.value)} />
                         ) : (
                           <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editResource(i, j, e.target.value)} />
                         )}
@@ -921,6 +988,7 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Risks */}
       {activeTab === "Risks" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
@@ -931,13 +999,13 @@ Dashboard Version: v65
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1200px] text-sm">
+            <table className="min-w-[1300px] text-sm">
               <colgroup>
                 <col width={110} />
-                <col width={320} />
+                <col width={360} />
                 <col width={90} />
                 <col width={90} />
-                <col width={320} />
+                <col width={360} />
                 <col width={160} />
                 <col width={140} />
                 <col width={120} />
@@ -960,7 +1028,7 @@ Dashboard Version: v65
                         {j === 6 ? (
                           <input type="date" className="w-full border rounded px-2 py-1" value={String(c || "").slice(0, 10)} onChange={(e) => editRisk(i, j, e.target.value)} />
                         ) : j === 1 || j === 4 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={c ?? ""} onChange={(e) => editRisk(i, j, e.target.value)} />
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={c ?? ""} onChange={(e) => editRisk(i, j, e.target.value)} />
                         ) : (
                           <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editRisk(i, j, e.target.value)} />
                         )}
@@ -986,32 +1054,34 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Meetings — restored popup modal for scheduling/agenda/notes + exports */}
       {activeTab === "Meetings" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
             <div className="font-semibold">Project Meetings</div>
             <Button size="sm" onClick={addMeeting} className="gap-2">
               <Plus className="h-4 w-4" />
-              Add Meeting
+              Schedule Meeting
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1400px] text-sm">
+            <table className="min-w-[1500px] text-sm">
               <colgroup>
-                <col width={220} />
+                <col width={260} />
                 <col width={120} />
                 <col width={100} />
                 <col width={100} />
-                <col width={220} />
+                <col width={240} />
                 <col width={180} />
                 <col width={140} />
                 <col width={260} />
                 <col width={320} />
+                <col width={140} />
                 <col width={60} />
               </colgroup>
               <thead className="bg-slate-50 text-slate-600">
                 <tr>
-                  {["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes", ""].map((h) => (
+                  {["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes", "Actions", ""].map((h) => (
                     <th key={h} className="text-left px-2 py-2 border-b">
                       {h}
                     </th>
@@ -1024,14 +1094,27 @@ Dashboard Version: v65
                     {r.map((c: any, j: number) => (
                       <td key={j} className="px-2 py-1">
                         {j === 1 ? (
-                          <input type="date" className="w-full border rounded px-2 py-1" value={String(c || "").slice(0, 10)} onChange={(e) => editMeeting(i, j, e.target.value)} />
+                          <input type="date" className="w-full border rounded px-2 py-1" value={String(c || "").slice(0, 10)} onChange={(e) => editInlineMeeting(i, j, e.target.value)} />
                         ) : j === 7 || j === 8 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[50px]" value={c ?? ""} onChange={(e) => editMeeting(i, j, e.target.value)} />
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[48px] resize-none" value={c ?? ""} onChange={(e) => editInlineMeeting(i, j, e.target.value)} />
                         ) : (
-                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editMeeting(i, j, e.target.value)} />
+                          <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editInlineMeeting(i, j, e.target.value)} />
                         )}
                       </td>
                     ))}
+                    <td className="px-2 py-1 whitespace-nowrap">
+                      <div className="flex gap-2">
+                        <Button variant="outline" size="sm" onClick={() => openMeetingModal(i)} className="gap-1">
+                          <Pencil className="h-4 w-4" /> Edit
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => exportMeetingPDF(meetings[i])} className="gap-1">
+                          <FileText className="h-4 w-4" /> PDF
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => exportMeetingICS(meetings[i])}>
+                          ICS
+                        </Button>
+                      </div>
+                    </td>
                     <td className="px-2 py-1">
                       <Button variant="destructive" size="icon" onClick={() => deleteMeeting(i)}>
                         <Trash2 className="h-4 w-4" />
@@ -1041,17 +1124,122 @@ Dashboard Version: v65
                 ))}
                 {!meetings.length && (
                   <tr>
-                    <td colSpan={10} className="px-3 py-6 text-center text-slate-500">
-                      No meetings. Click “Add Meeting”.
+                    <td colSpan={11} className="px-3 py-6 text-center text-slate-500">
+                      No meetings. Click “Schedule Meeting”.
                     </td>
                   </tr>
                 )}
               </tbody>
             </table>
           </div>
+
+          {/* Modal */}
+          {meetingModalOpen && (
+            <div className="fixed inset-0 z-50">
+              <div className="absolute inset-0 bg-black/40" onClick={() => setMeetingModalOpen(false)} />
+              <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 bg-white rounded-xl shadow-xl w-[800px] max-w-[95vw]">
+                <div className="p-5 border-b font-semibold">{meetingIdx === null ? "Schedule Meeting" : "Edit Meeting"}</div>
+                <div className="p-5 space-y-3">
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="text-sm">
+                      Title
+                      <input
+                        className="w-full border rounded px-2 py-1 mt-1"
+                        value={meetingDraft[0] || ""}
+                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 0: e.target.value }))}
+                      />
+                    </label>
+                    <label className="text-sm">
+                      Date
+                      <input
+                        type="date"
+                        className="w-full border rounded px-2 py-1 mt-1"
+                        value={String(meetingDraft[1] || "").slice(0, 10)}
+                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 1: e.target.value }))}
+                      />
+                    </label>
+                    <label className="text-sm">
+                      Time
+                      <input
+                        className="w-full border rounded px-2 py-1 mt-1"
+                        value={meetingDraft[2] || ""}
+                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 2: e.target.value }))}
+                      />
+                    </label>
+                    <label className="text-sm">
+                      Duration
+                      <input
+                        className="w-full border rounded px-2 py-1 mt-1"
+                        value={meetingDraft[3] || ""}
+                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 3: e.target.value }))}
+                      />
+                    </label>
+                    <label className="text-sm">
+                      Attendees
+                      <input
+                        className="w-full border rounded px-2 py-1 mt-1"
+                        value={meetingDraft[4] || ""}
+                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 4: e.target.value }))}
+                      />
+                    </label>
+                    <label className="text-sm">
+                      Location
+                      <input
+                        className="w-full border rounded px-2 py-1 mt-1"
+                        value={meetingDraft[5] || ""}
+                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 5: e.target.value }))}
+                      />
+                    </label>
+                    <label className="text-sm col-span-2">
+                      Status
+                      <input
+                        className="w-full border rounded px-2 py-1 mt-1"
+                        value={meetingDraft[6] || ""}
+                        onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 6: e.target.value }))}
+                      />
+                    </label>
+                  </div>
+                  <label className="text-sm block">
+                    Agenda
+                    <textarea
+                      className="w-full border rounded px-2 py-2 mt-1 min-h-[90px] resize-none"
+                      value={meetingDraft[7] || ""}
+                      onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 7: e.target.value }))}
+                    />
+                  </label>
+                  <label className="text-sm block">
+                    Notes
+                    <textarea
+                      className="w-full border rounded px-2 py-2 mt-1 min-h-[120px] resize-none"
+                      value={meetingDraft[8] || ""}
+                      onChange={(e) => setMeetingDraft((d) => Object.assign([...d], { 8: e.target.value }))}
+                    />
+                  </label>
+                </div>
+                <div className="p-4 border-t flex justify-between">
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={() => exportMeetingPDF(meetingDraft)} className="gap-2">
+                      <FileText className="h-4 w-4" />
+                      Export PDF
+                    </Button>
+                    <Button variant="outline" onClick={() => exportMeetingICS(meetingDraft)}>
+                      Export ICS
+                    </Button>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={() => setMeetingModalOpen(false)}>
+                      Cancel
+                    </Button>
+                    <Button onClick={saveMeetingFromModal}>Save Meeting</Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
+      {/* KPIs */}
       {activeTab === "KPIs" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
@@ -1062,13 +1250,13 @@ Dashboard Version: v65
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1000px] text-sm">
+            <table className="min-w-[1000px] text-sm">
               <colgroup>
-                <col width={260} />
+                <col width={300} />
                 <col width={140} />
                 <col width={140} />
                 <col width={100} />
-                <col width={200} />
+                <col width={220} />
                 <col width={60} />
               </colgroup>
               <thead className="bg-slate-50 text-slate-600">
@@ -1087,20 +1275,10 @@ Dashboard Version: v65
                       <input className="w-full border rounded px-2 py-1" value={k.name} onChange={(e) => editKPI(k.id, "name", e.target.value)} />
                     </td>
                     <td className="px-2 py-1">
-                      <input
-                        type="number"
-                        className="w-full border rounded px-2 py-1"
-                        value={k.current_value}
-                        onChange={(e) => editKPI(k.id, "current_value", Number(e.target.value))}
-                      />
+                      <input type="number" className="w-full border rounded px-2 py-1" value={k.current_value} onChange={(e) => editKPI(k.id, "current_value", Number(e.target.value))} />
                     </td>
                     <td className="px-2 py-1">
-                      <input
-                        type="number"
-                        className="w-full border rounded px-2 py-1"
-                        value={k.target_value}
-                        onChange={(e) => editKPI(k.id, "target_value", Number(e.target.value))}
-                      />
+                      <input type="number" className="w-full border rounded px-2 py-1" value={k.target_value} onChange={(e) => editKPI(k.id, "target_value", Number(e.target.value))} />
                     </td>
                     <td className="px-2 py-1">
                       <input className="w-full border rounded px-2 py-1" value={k.unit} onChange={(e) => editKPI(k.id, "unit", e.target.value)} />
@@ -1128,6 +1306,7 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Financials */}
       {activeTab === "Financials" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
@@ -1138,13 +1317,13 @@ Dashboard Version: v65
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1000px] text-sm">
+            <table className="min-w-[1100px] text-sm">
               <colgroup>
-                <col width={160} />
-                <col width={300} />
+                <col width={180} />
+                <col width={320} />
                 <col width={120} />
-                <col width={140} />
-                <col width={280} />
+                <col width={160} />
+                <col width={320} />
                 <col width={60} />
               </colgroup>
               <thead className="bg-slate-50 text-slate-600">
@@ -1162,14 +1341,9 @@ Dashboard Version: v65
                     {r.map((c: any, j: number) => (
                       <td key={j} className="px-2 py-1">
                         {j === 2 ? (
-                          <input
-                            type="number"
-                            className="w-full border rounded px-2 py-1"
-                            value={c ?? 0}
-                            onChange={(e) => editFinancial(i, j, Number(e.target.value))}
-                          />
+                          <input type="number" className="w-full border rounded px-2 py-1" value={c ?? 0} onChange={(e) => editFinancial(i, j, Number(e.target.value))} />
                         ) : j === 4 ? (
-                          <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={c ?? ""} onChange={(e) => editFinancial(i, j, e.target.value)} />
+                          <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={c ?? ""} onChange={(e) => editFinancial(i, j, e.target.value)} />
                         ) : (
                           <input className="w-full border rounded px-2 py-1" value={c ?? ""} onChange={(e) => editFinancial(i, j, e.target.value)} />
                         )}
@@ -1195,6 +1369,7 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Glossary */}
       {activeTab === "Glossary" && (
         <div className="space-y-3">
           <div className="flex justify-between items-center">
@@ -1205,9 +1380,9 @@ Dashboard Version: v65
             </Button>
           </div>
           <div className="overflow-auto border rounded-lg">
-            <table className="w-[1000px] text-sm">
+            <table className="min-w-[1000px] text-sm">
               <colgroup>
-                <col width={260} />
+                <col width={280} />
                 <col width={680} />
                 <col width={60} />
               </colgroup>
@@ -1227,7 +1402,7 @@ Dashboard Version: v65
                       <input className="w-full border rounded px-2 py-1" value={r?.[0] ?? ""} onChange={(e) => editGlossary(i, 0, e.target.value)} />
                     </td>
                     <td className="px-2 py-1">
-                      <textarea className="w-full border rounded px-2 py-1 min-h-[36px]" value={r?.[1] ?? ""} onChange={(e) => editGlossary(i, 1, e.target.value)} />
+                      <textarea className="w-full border rounded px-2 py-1 min-h-[40px] resize-none" value={r?.[1] ?? ""} onChange={(e) => editGlossary(i, 1, e.target.value)} />
                     </td>
                     <td className="px-2 py-1">
                       <Button variant="destructive" size="icon" onClick={() => deleteGlossary(i)}>
@@ -1249,6 +1424,7 @@ Dashboard Version: v65
         </div>
       )}
 
+      {/* Config */}
       {activeTab === "Config" && (
         <div className="space-y-4">
           <div className="font-semibold">Configuration</div>
@@ -1265,13 +1441,7 @@ Dashboard Version: v65
                     onChange={(e) =>
                       setPlan((prev: any) => ({
                         ...prev,
-                        scenarios: {
-                          ...prev.scenarios,
-                          [scenario]: {
-                            ...prev.scenarios[scenario],
-                            unitsPerYear: Number(e.target.value),
-                          },
-                        },
+                        scenarios: { ...prev.scenarios, [scenario]: { ...prev.scenarios[scenario], unitsPerYear: Number(e.target.value) } },
                       }))
                     }
                   />
@@ -1285,13 +1455,7 @@ Dashboard Version: v65
                     onChange={(e) =>
                       setPlan((prev: any) => ({
                         ...prev,
-                        scenarios: {
-                          ...prev.scenarios,
-                          [scenario]: {
-                            ...prev.scenarios[scenario],
-                            hoursPerDay: Number(e.target.value),
-                          },
-                        },
+                        scenarios: { ...prev.scenarios, [scenario]: { ...prev.scenarios[scenario], hoursPerDay: Number(e.target.value) } },
                       }))
                     }
                   />
@@ -1305,13 +1469,7 @@ Dashboard Version: v65
                     onChange={(e) =>
                       setPlan((prev: any) => ({
                         ...prev,
-                        scenarios: {
-                          ...prev.scenarios,
-                          [scenario]: {
-                            ...prev.scenarios[scenario],
-                            shifts: Number(e.target.value),
-                          },
-                        },
+                        scenarios: { ...prev.scenarios, [scenario]: { ...prev.scenarios[scenario], shifts: Number(e.target.value) } },
                       }))
                     }
                   />
