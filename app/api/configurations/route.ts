@@ -1,103 +1,95 @@
-// app/api/configurations/route.ts
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 
-function unauth(msg = "Not authenticated") {
-  // Normalize all auth failures to 401 instead of 500
-  return NextResponse.json({ error: msg }, { status: 401 });
-}
+const ORG_KEY = process.env.ORG_KEY || "vitaltrace.com.au";
 
 /**
  * GET /api/configurations
- * Returns all configuration rows for the authenticated user (newest first).
+ * Return all configurations for this org (newest first).
  */
 export async function GET() {
   try {
-    const supabase = createClient();
+    const supabase = await createClient();
 
+    // Require an authenticated user (so RLS 'authenticated' applies)
     const {
       data: { user },
       error: userErr,
     } = await supabase.auth.getUser();
 
-    // Treat "Auth session missing!" and any auth error as 401
     if (userErr) {
-      console.error("[/api/configurations][GET] auth error:", userErr.message);
-      return unauth(userErr.message);
+      return NextResponse.json({ error: userErr.message }, { status: 500 });
     }
     if (!user) {
-      console.warn("[/api/configurations][GET] no user in session");
-      return unauth();
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
     const { data, error } = await supabase
       .from("configurations")
       .select("*")
-      .eq("user_id", user.id)
+      .eq("org_key", ORG_KEY)
       .order("updated_at", { ascending: false });
 
     if (error) {
-      console.error("[/api/configurations][GET] db error:", error.message);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
     return NextResponse.json(data ?? []);
   } catch (err: any) {
-    console.error("[/api/configurations][GET] unexpected:", err?.message || err);
     return NextResponse.json({ error: err?.message ?? "Unexpected error" }, { status: 500 });
   }
 }
 
 /**
  * POST /api/configurations
- * Upserts a named configuration for the authenticated user.
- * Body: { name?: string, description?: string, data: any, modified_by?: string }
+ * Upsert a configuration by (org_key, name)
+ * Body: { name: string, description?: string, data: any, modified_by?: string }
  */
 export async function POST(req: Request) {
   try {
-    const supabase = createClient();
+    const supabase = await createClient();
 
+    // Require an authenticated user
     const {
       data: { user },
       error: userErr,
     } = await supabase.auth.getUser();
 
     if (userErr) {
-      console.error("[/api/configurations][POST] auth error:", userErr.message);
-      return unauth(userErr.message);
+      return NextResponse.json({ error: userErr.message }, { status: 500 });
     }
     if (!user) {
-      console.warn("[/api/configurations][POST] no user in session");
-      return unauth();
+      return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
     const body = await req.json();
+    const cleanName = String(body.name ?? "ScaleUp-Dashboard-Config").trim();
 
     const payload = {
-      user_id: user.id,
-      name: String(body.name ?? "ScaleUp-Dashboard-Config"),
+      org_key: ORG_KEY,
+      name: cleanName,
       description: body.description ?? null,
       data: body.data ?? {},
       modified_by: body.modified_by ?? user.email ?? "user",
+      // updated_at will be set by DB default/trigger if you have one; otherwise:
+      updated_at: new Date().toISOString(),
     };
 
     const { data, error } = await supabase
       .from("configurations")
-      .upsert(payload, { onConflict: "user_id,name" })
+      .upsert(payload, { onConflict: "org_key,name" })
       .select()
       .single();
 
     if (error) {
-      console.error("[/api/configurations][POST] db error:", error.message);
       return NextResponse.json({ error: error.message }, { status: 500 });
     }
 
     return NextResponse.json(data);
   } catch (err: any) {
-    console.error("[/api/configurations][POST] unexpected:", err?.message || err);
     return NextResponse.json({ error: err?.message ?? "Unexpected error" }, { status: 500 });
   }
 }
