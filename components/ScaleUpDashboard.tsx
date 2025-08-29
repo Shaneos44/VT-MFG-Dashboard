@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Loader2, TrendingUp } from "lucide-react"
+import { Loader2, Plus, Calendar as CalendarIcon, FileText, Save, X, TrendingUp } from "lucide-react"
 import { jsPDF } from "jspdf"
 import { generateWeeklySummary } from "@/lib/utils"
 import { clone, SEED_PLAN } from "@/lib/constants"
@@ -60,7 +60,54 @@ function SyncStatusIndicator({ syncStatus }: { syncStatus: SyncStatus }) {
   )
 }
 
+const DATE_TZ = "T00:00:00"
+
+function parseMinutesFromDuration(d: string): number {
+  if (!d) return 60
+  const m = d.toLowerCase().trim()
+  const mm = m.match(/(\d+)\s*m(in)?/)
+  const hh = m.match(/(\d+)\s*h(our|rs)?/)
+  if (mm) return parseInt(mm[1], 10)
+  if (hh) return parseInt(hh[1], 10) * 60
+  const num = parseInt(m.replace(/\D/g, ""), 10)
+  return Number.isFinite(num) && num > 0 ? num : 60
+}
+
+function combineDateTime(date: string, time: string): Date {
+  if (!date) return new Date()
+  if (!time) return new Date(date + DATE_TZ)
+  // Accept "HH:mm" or "HH:mm:ss"
+  const parts = time.split(":")
+  const d = new Date(date + DATE_TZ)
+  if (parts.length >= 2) {
+    d.setHours(parseInt(parts[0] || "0", 10))
+    d.setMinutes(parseInt(parts[1] || "0", 10))
+    d.setSeconds(parts.length >= 3 ? parseInt(parts[2] || "0", 10) : 0)
+  }
+  return d
+}
+
+function fmtICS(dt: Date) {
+  // YYYYMMDDTHHMMSSZ (use local time without TZ for simplicity)
+  const pad = (n: number) => String(n).padStart(2, "0")
+  const y = dt.getFullYear()
+  const mo = pad(dt.getMonth() + 1)
+  const da = pad(dt.getDate())
+  const h = pad(dt.getHours())
+  const mi = pad(dt.getMinutes())
+  const s = pad(dt.getSeconds())
+  return `${y}${mo}${da}T${h}${mi}${s}`
+}
+
+function ensureArray(v: any): any[] {
+  if (Array.isArray(v)) return v
+  if (v && typeof v === "object" && Array.isArray((v as any).rows)) return (v as any).rows
+  if (v == null) return []
+  return [v]
+}
+
 const ScaleUpDashboard: React.FC = () => {
+  // Core app state
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -143,6 +190,7 @@ const ScaleUpDashboard: React.FC = () => {
     connectedUsers: 1,
   })
 
+  // ---------- Table data ----------
   const [manufacturingProcesses, setManufacturingProcesses] = useState<any[][]>([
     ["Receive Needles", 0, 1, 100, 0, "Manual Station", "Manual", "Validated", "Operator1"],
     ["Mount Needles to VS & Run Inspection", 2, 1, 98, 120, "Vision System", "Semi-Auto", "Validated", "Operator1"],
@@ -198,6 +246,39 @@ const ScaleUpDashboard: React.FC = () => {
     ["Dipcoating", "Controlled immersion coating process"],
   ])
 
+  // ---------- Variant data normalization ----------
+  const currentVariantData = useMemo(() => {
+    const base =
+      (plan.products && plan.products[scenario]) || {
+        projects: [],
+        equipment: [],
+        capex50k: [],
+        capex200k: [],
+        opex50k: [],
+        opex200k: [],
+        resources: [],
+        hiring: [],
+        risks: [],
+        actions: [],
+        processes: [],
+        manufacturing: [],
+        meetings: [],
+        launch: {
+          fiftyK: new Date().toISOString(),
+          twoHundredK: new Date().toISOString(),
+        },
+      }
+    return {
+      ...base,
+      projects: ensureArray(base.projects),
+      manufacturing: ensureArray(base.manufacturing),
+      resources: ensureArray(base.resources),
+      risks: ensureArray(base.risks),
+      meetings: ensureArray(base.meetings),
+    }
+  }, [plan, scenario])
+
+  // ---------- Projects table (wide column widths so text doesn't overlay) ----------
   const projectsHeaders = [
     "id",
     "name",
@@ -251,63 +332,7 @@ const ScaleUpDashboard: React.FC = () => {
     150,
     130,
   ]
-
   const projectsTableMinW = useMemo(() => projectsWidths.reduce((a, b) => a + b, 0) + 60, [projectsWidths])
-
-  const manufacturingHeaders = [
-    "Process",
-    "Time (min)",
-    "Batch Size",
-    "Yield (%)",
-    "Cycle Time (s)",
-    "Equipment",
-    "Type",
-    "Status",
-    "Operator",
-  ]
-  const resourcesHeaders = ["Resource", "Type", "Quantity", "Cost", "Department", "Notes"]
-  const risksHeaders = ["Risk", "Impact", "Probability", "Mitigation", "Owner", "Status"]
-  const meetingsHeaders = ["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes"]
-  const financialHeaders = ["Category", "Item", "Amount", "Type", "Notes"]
-  const glossaryHeaders = ["Term", "Definition"]
-
-  const ensureArray = (v: any): any[] => {
-    if (Array.isArray(v)) return v
-    if (v && typeof v === "object" && Array.isArray((v as any).rows)) return (v as any).rows
-    if (v == null) return []
-    return [v]
-  }
-
-  const currentVariantData = useMemo(() => {
-    const base =
-      (plan.products && plan.products[scenario]) || {
-        projects: [],
-        equipment: [],
-        capex50k: [],
-        capex200k: [],
-        opex50k: [],
-        opex200k: [],
-        resources: [],
-        hiring: [],
-        risks: [],
-        actions: [],
-        processes: [],
-        manufacturing: [],
-        meetings: [],
-        launch: {
-          fiftyK: new Date().toISOString(),
-          twoHundredK: new Date().toISOString(),
-        },
-      }
-    return {
-      ...base,
-      projects: ensureArray(base.projects),
-      manufacturing: ensureArray(base.manufacturing),
-      resources: ensureArray(base.resources),
-      risks: ensureArray(base.risks),
-      meetings: ensureArray(base.meetings),
-    }
-  }, [plan, scenario])
 
   const projectRows = useMemo(() => {
     const rows = ensureArray(currentVariantData.projects).map((p: any, idx: number) => {
@@ -386,71 +411,206 @@ const ScaleUpDashboard: React.FC = () => {
     setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
   }
 
-  // Meetings rows (now with Agenda and Notes)
-  const meetingsRows = useMemo(() => {
-    const rows = ensureArray(currentVariantData.meetings).map((m: any, idx: number) => {
-      // Normalize to 9 columns: title, date, time, duration, attendees, location, status, agenda, notes
-      if (!Array.isArray(m)) {
-        return [
-          m?.title || `Meeting ${idx + 1}`,
-          m?.date || new Date().toISOString().slice(0, 10),
-          m?.time || "10:00",
-          m?.duration || "60 min",
-          m?.attendees || "Team",
-          m?.location || "Location",
-          m?.status || "Scheduled",
-          m?.agenda || "",
-          m?.notes || "",
-        ]
+  // ---------- Meetings manager (schedule window + agenda/notes + export) ----------
+  type Meeting = {
+    title: string
+    date: string
+    time: string
+    duration: string
+    attendees: string
+    location: string
+    status: string
+    agenda: string
+    notes: string
+  }
+
+  const meetingsList: Meeting[] = useMemo(() => {
+    const rows = ensureArray(currentVariantData.meetings)
+    return rows.map((m: any, idx: number) => {
+      if (Array.isArray(m)) {
+        const copy = [...m]
+        while (copy.length < 9) copy.push("")
+        return {
+          title: String(copy[0] ?? `Meeting ${idx + 1}`),
+          date: String(copy[1] ?? new Date().toISOString().slice(0, 10)),
+          time: String(copy[2] ?? "10:00"),
+          duration: String(copy[3] ?? "60 min"),
+          attendees: String(copy[4] ?? "Team"),
+          location: String(copy[5] ?? "Location"),
+          status: String(copy[6] ?? "Scheduled"),
+          agenda: String(copy[7] ?? ""),
+          notes: String(copy[8] ?? ""),
+        }
       }
-      const arr = [...m]
-      while (arr.length < 9) arr.push("")
-      return arr.slice(0, 9)
+      return {
+        title: m?.title || `Meeting ${idx + 1}`,
+        date: m?.date || new Date().toISOString().slice(0, 10),
+        time: m?.time || "10:00",
+        duration: m?.duration || "60 min",
+        attendees: m?.attendees || "Team",
+        location: m?.location || "Location",
+        status: m?.status || "Scheduled",
+        agenda: m?.agenda || "",
+        notes: m?.notes || "",
+      }
     })
-    return rows
   }, [currentVariantData.meetings])
 
-  const handleMeetingCellChange = (rowIndex: number, colIndex: number, value: any) => {
-    const updated = meetingsRows.map((r) => [...r])
-    if (updated[rowIndex]) updated[rowIndex][colIndex] = value
+  const [selectedMeetingIdx, setSelectedMeetingIdx] = useState<number>(-1)
+
+  useEffect(() => {
+    if (meetingsList.length > 0 && (selectedMeetingIdx < 0 || selectedMeetingIdx >= meetingsList.length)) {
+      setSelectedMeetingIdx(0)
+    }
+  }, [meetingsList.length, selectedMeetingIdx])
+
+  const writeMeetingsBack = (list: Meeting[]) => {
+    const rows = list.map((m) => [
+      m.title,
+      m.date,
+      m.time,
+      m.duration,
+      m.attendees,
+      m.location,
+      m.status,
+      m.agenda,
+      m.notes,
+    ])
     setPlan((prev) => ({
       ...prev,
       products: {
         ...prev.products,
         [scenario]: {
           ...prev.products?.[scenario],
-          meetings: updated,
+          meetings: rows,
         },
       },
     }))
     setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
   }
 
-  const addMeetingRow = () => {
-    const newRow = [
-      "New Project Meeting",
-      new Date().toISOString().slice(0, 10),
-      "10:00",
-      "60 min",
-      "Team Members",
-      "Conference Room A / Zoom",
-      "Scheduled",
-      "1) Objectives  2) Status Roundtable  3) Risks & Mitigations  4) Decisions",
-      "",
-    ]
-    setPlan((prev) => ({
-      ...prev,
-      products: {
-        ...prev.products,
-        [scenario]: {
-          ...prev.products?.[scenario],
-          meetings: [...meetingsRows, newRow],
-        },
-      },
-    }))
-    setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
+  const updateMeetingField = (idx: number, field: keyof Meeting, value: string) => {
+    const copy = meetingsList.map((m) => ({ ...m }))
+    copy[idx][field] = value
+    writeMeetingsBack(copy)
   }
 
+  const addMeeting = () => {
+    const copy = meetingsList.map((m) => ({ ...m }))
+    copy.push({
+      title: "New Project Meeting",
+      date: new Date().toISOString().slice(0, 10),
+      time: "10:00",
+      duration: "60 min",
+      attendees: "Project Team, Stakeholders",
+      location: "Conference Room A / Zoom",
+      status: "Scheduled",
+      agenda: "1) Objectives\n2) Status updates\n3) Risks & blockers\n4) Decisions & actions",
+      notes: "",
+    })
+    writeMeetingsBack(copy)
+    setSelectedMeetingIdx(copy.length - 1)
+  }
+
+  const deleteMeeting = (idx: number) => {
+    const copy = meetingsList.filter((_, i) => i !== idx)
+    writeMeetingsBack(copy)
+    setSelectedMeetingIdx(copy.length ? Math.max(0, idx - 1) : -1)
+  }
+
+  const exportSelectedMeetingPDF = () => {
+    if (selectedMeetingIdx < 0 || selectedMeetingIdx >= meetingsList.length) return
+    const m = meetingsList[selectedMeetingIdx]
+    const doc = new jsPDF({ unit: "pt", format: "a4" })
+    const W = 595
+    const M = 40
+    let y = M
+
+    const addLines = (text: string, indent = 0, size = 11, gap = 14) => {
+      doc.setFont("helvetica", "normal")
+      doc.setFontSize(size)
+      const maxW = W - 2 * M - indent
+      const lines = doc.splitTextToSize(text, maxW)
+      lines.forEach((ln) => {
+        if (y + gap > 842 - M) {
+          doc.addPage()
+          y = M
+        }
+        doc.text(ln, M + indent, y)
+        y += gap
+      })
+    }
+
+    doc.setFont("helvetica", "bold")
+    doc.setFontSize(16)
+    doc.text("Meeting Summary", M, y)
+    y += 22
+
+    addLines(`Title: ${m.title}`)
+    addLines(`When: ${m.date} ${m.time}  •  Duration: ${m.duration}`)
+    addLines(`Where: ${m.location}`)
+    addLines(`Attendees: ${m.attendees}`)
+    addLines(`Status: ${m.status}`)
+    y += 6
+    doc.setDrawColor(200, 200, 200)
+    doc.line(M, y, W - M, y)
+    y += 16
+
+    doc.setFont("helvetica", "bold")
+    doc.setFontSize(13)
+    doc.text("Agenda", M, y)
+    y += 16
+    addLines(m.agenda || "—", 0, 11, 14)
+
+    y += 6
+    doc.setDrawColor(200, 200, 200)
+    doc.line(M, y, W - M, y)
+    y += 16
+
+    doc.setFont("helvetica", "bold")
+    doc.setFontSize(13)
+    doc.text("Notes", M, y)
+    y += 16
+    addLines(m.notes || "—", 0, 11, 14)
+
+    doc.save(`Meeting_${m.title.replace(/\s+/g, "_")}_${m.date}.pdf`)
+  }
+
+  const exportSelectedMeetingICS = () => {
+    if (selectedMeetingIdx < 0 || selectedMeetingIdx >= meetingsList.length) return
+    const m = meetingsList[selectedMeetingIdx]
+    const start = combineDateTime(m.date, m.time)
+    const mins = parseMinutesFromDuration(m.duration)
+    const end = new Date(start.getTime() + mins * 60000)
+
+    const ics = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//VitalTrace//ScaleUp Dashboard//EN",
+      "CALSCALE:GREGORIAN",
+      "METHOD:PUBLISH",
+      "BEGIN:VEVENT",
+      `UID:${crypto.randomUUID()}@vitaltrace`,
+      `DTSTAMP:${fmtICS(new Date())}`,
+      `DTSTART:${fmtICS(start)}`,
+      `DTEND:${fmtICS(end)}`,
+      `SUMMARY:${m.title}`,
+      `DESCRIPTION:${(m.agenda || "").replace(/\n/g, "\\n")}${m.notes ? "\\n\\nNotes: " + m.notes.replace(/\n/g, "\\n") : ""}`,
+      `LOCATION:${m.location}`,
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n")
+
+    const blob = new Blob([ics], { type: "text/calendar;charset=utf-8" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `Meeting_${m.title.replace(/\s+/g, "_")}_${m.date}.ics`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  // ---------- Overview metrics ----------
   const overviewMetrics = useMemo(() => {
     const scenarioData =
       plan.scenarios && plan.scenarios[scenario]
@@ -483,6 +643,7 @@ const ScaleUpDashboard: React.FC = () => {
     }
   }, [plan, scenario, projectRows.length, risksData.length, costData, currentScenario])
 
+  // ---------- Supabase Persistence ----------
   const saveProjectDataToDatabase = async () => {
     try {
       setSaving(true)
@@ -545,6 +706,7 @@ const ScaleUpDashboard: React.FC = () => {
     loadProjectDataFromDatabase().finally(() => setLoading(false))
   }, [])
 
+  // ---------- Weekly TXT + Comprehensive PDF ----------
   const exportWeeklySummary = () => {
     const summary = generateWeeklySummary()
     const reportContent = `
@@ -688,16 +850,8 @@ Dashboard Version: v64
       status: r?.[7] ?? "",
     }))
 
-    const meetings = meetingsRows.map((m: any[]) => ({
-      title: m?.[0] ?? "",
-      date: m?.[1] ?? "",
-      time: m?.[2] ?? "—",
-      duration: m?.[3] ?? "—",
-      attendees: m?.[4] ?? "—",
-      location: m?.[5] ?? "—",
-      status: m?.[6] ?? "—",
-      agenda: m?.[7] ?? "",
-      notes: m?.[8] ?? "",
+    const meetings = meetingsList.map((m) => ({
+      ...m,
     }))
 
     const kpiRows = ensureArray(kpis).map((k: KPI) => ({
@@ -750,7 +904,6 @@ Dashboard Version: v64
           doc.text(ln, M, y)
           y += LINE
         })
-
         if (m.agenda && m.agenda.trim().length > 0) {
           const agendaLines = doc.splitTextToSize(`Agenda: ${m.agenda}`, maxW)
           agendaLines.forEach((ln) => {
@@ -780,14 +933,15 @@ Dashboard Version: v64
 
     ensureSpace(30)
     doc.setDrawColor(200, 200, 200)
-    doc.line(M, y, PAGE_W - M, y)
+    doc.line(40, y, PAGE_W - 40, y)
     y += 14
     doc.setFontSize(9)
-    doc.text(`End of report • Scenario ${scenario} • Variant ${variant}`, M, y)
+    doc.text(`End of report • Scenario ${scenario} • Variant ${variant}`, 40, y)
 
     doc.save(`VitalTrace_Comprehensive_Report_${variant}_${scenario}.pdf`)
   }
 
+  // ---------- Loading/Error screens ----------
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -813,7 +967,7 @@ Dashboard Version: v64
             <Loader2 className="h-6 w-6" />
             <span className="text-lg font-medium">Dashboard</span>
           </div>
-          <p className="text-red-600 text-sm">{error}</p>
+        <p className="text-red-600 text-sm">{error}</p>
           <Button variant="outline" onClick={() => setError(null)}>
             Dismiss
           </Button>
@@ -821,6 +975,26 @@ Dashboard Version: v64
       </div>
     )
   }
+
+  // ---------- UI ----------
+  const meetingsSelected = selectedMeetingIdx >= 0 && selectedMeetingIdx < meetingsList.length ? meetingsList[selectedMeetingIdx] : null
+
+  const meetingsHeaders = ["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes"]
+  const manufacturingHeaders = [
+    "Process",
+    "Time (min)",
+    "Batch Size",
+    "Yield (%)",
+    "Cycle Time (s)",
+    "Equipment",
+    "Type",
+    "Status",
+    "Operator",
+  ]
+  const resourcesHeaders = ["Resource", "Type", "Quantity", "Cost", "Department", "Notes"]
+  const risksHeaders = ["Risk", "Impact", "Probability", "Mitigation", "Owner", "Status"]
+  const financialHeaders = ["Category", "Item", "Amount", "Type", "Notes"]
+  const glossaryHeaders = ["Term", "Definition"]
 
   return (
     <div className="p-4 space-y-6">
@@ -1056,46 +1230,201 @@ Dashboard Version: v64
       )}
 
       {activeTab === "meetings" && (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[1500px] text-sm">
-            <thead className="sticky top-0 bg-background z-10">
-              <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
-                {meetingsHeaders.map((h) => (
-                  <th key={h} className="whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {meetingsRows.map((row, rIdx) => (
-                <tr key={rIdx} className="border-t">
-                  {row.map((cell: any, cIdx: number) => {
-                    const isLong = cIdx === 7 || cIdx === 8
-                    return (
-                      <td key={`${rIdx}-${cIdx}`}>
-                        {isLong ? (
-                          <textarea
-                            className="block w-full min-w-[260px] rounded-md border px-2 py-1 text-sm h-[96px] resize-none whitespace-pre-wrap break-words"
-                            value={cell ?? ""}
-                            onChange={(e) => handleMeetingCellChange(rIdx, cIdx, e.target.value)}
-                          />
-                        ) : (
-                          <input
-                            className="block w-full min-w-[160px] rounded-md border px-2 py-1 text-sm h-9"
-                            value={cell ?? ""}
-                            onChange={(e) => handleMeetingCellChange(rIdx, cIdx, e.target.value)}
-                          />
-                        )}
-                      </td>
-                    )
-                  })}
-                </tr>
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+          <div className="xl:col-span-4 rounded-xl border bg-card">
+            <div className="flex items-center justify-between p-3 border-b">
+              <div className="font-medium">Meetings</div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={addMeeting} className="gap-2">
+                  <Plus className="h-4 w-4" />
+                  Schedule
+                </Button>
+              </div>
+            </div>
+            <div className="max-h-[520px] overflow-y-auto divide-y">
+              {meetingsList.length === 0 && <div className="p-3 text-sm text-muted-foreground">No meetings yet.</div>}
+              {meetingsList.map((m, idx) => (
+                <button
+                  key={`${m.title}-${idx}`}
+                  className={`w-full text-left p-3 hover:bg-muted/50 ${idx === selectedMeetingIdx ? "bg-muted" : ""}`}
+                  onClick={() => setSelectedMeetingIdx(idx)}
+                >
+                  <div className="font-medium">{m.title}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {m.date} • {m.time} • {m.duration}
+                  </div>
+                  <div className="text-xs truncate">{m.location}</div>
+                </button>
               ))}
-            </tbody>
-          </table>
-          <div className="p-3 flex gap-2">
-            <Button variant="outline" onClick={addMeetingRow}>
-              Add Meeting
-            </Button>
+            </div>
+          </div>
+
+          <div className="xl:col-span-8 rounded-xl border bg-card">
+            <div className="flex items-center justify-between p-3 border-b">
+              <div className="font-medium">Meeting Details</div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={exportSelectedMeetingICS}
+                  disabled={!meetingsSelected}
+                  className="gap-2"
+                >
+                  <CalendarIcon className="h-4 w-4" />
+                  Export .ics
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={exportSelectedMeetingPDF}
+                  disabled={!meetingsSelected}
+                  className="gap-2"
+                >
+                  <FileText className="h-4 w-4" />
+                  Export PDF
+                </Button>
+                {meetingsSelected && (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => deleteMeeting(selectedMeetingIdx)}
+                    className="gap-2"
+                  >
+                    <X className="h-4 w-4" />
+                    Delete
+                  </Button>
+                )}
+              </div>
+            </div>
+
+            {!meetingsSelected && <div className="p-4 text-sm text-muted-foreground">Select a meeting to edit.</div>}
+
+            {meetingsSelected && (
+              <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground">Title</label>
+                  <input
+                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
+                    value={meetingsSelected.title}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "title", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground">Date</label>
+                  <input
+                    type="date"
+                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
+                    value={meetingsSelected.date}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "date", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground">Time</label>
+                  <input
+                    type="time"
+                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
+                    value={meetingsSelected.time}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "time", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground">Duration</label>
+                  <input
+                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
+                    value={meetingsSelected.duration}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "duration", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-xs text-muted-foreground">Attendees</label>
+                  <input
+                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
+                    value={meetingsSelected.attendees}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "attendees", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-xs text-muted-foreground">Location</label>
+                  <input
+                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
+                    value={meetingsSelected.location}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "location", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-xs text-muted-foreground">Status</label>
+                  <input
+                    className="block w-full rounded-md border px-2 py-1 text-sm h-9"
+                    value={meetingsSelected.status}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "status", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-xs text-muted-foreground">Agenda</label>
+                  <textarea
+                    className="block w-full rounded-md border px-2 py-2 text-sm min-h-[120px] resize-none whitespace-pre-wrap"
+                    value={meetingsSelected.agenda}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "agenda", e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-2 md:col-span-2">
+                  <label className="text-xs text-muted-foreground">Notes</label>
+                  <textarea
+                    className="block w-full rounded-md border px-2 py-2 text-sm min-h-[140px] resize-none whitespace-pre-wrap"
+                    value={meetingsSelected.notes}
+                    onChange={(e) => updateMeetingField(selectedMeetingIdx, "notes", e.target.value)}
+                  />
+                </div>
+
+                <div className="md:col-span-2 flex justify-end gap-2">
+                  <Button onClick={saveProjectDataToDatabase} className="gap-2">
+                    <Save className="h-4 w-4" />
+                    Save
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="border-t p-3">
+              <div className="text-xs text-muted-foreground mb-2">Quick Table</div>
+              <div className="overflow-x-auto">
+                <table className="table-fixed w-full min-w-[1500px] text-sm">
+                  <thead>
+                    <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
+                      {meetingsHeaders.map((h) => (
+                        <th key={h} className="whitespace-nowrap">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2">
+                    {meetingsList.map((m, idx) => (
+                      <tr key={`tbl-${idx}`} className="border-t">
+                        <td className="whitespace-nowrap">{m.title}</td>
+                        <td className="whitespace-nowrap">{m.date}</td>
+                        <td className="whitespace-nowrap">{m.time}</td>
+                        <td className="whitespace-nowrap">{m.duration}</td>
+                        <td className="whitespace-nowrap">{m.attendees}</td>
+                        <td className="whitespace-nowrap">{m.location}</td>
+                        <td className="whitespace-nowrap">{m.status}</td>
+                        <td className="max-w-[360px]">
+                          <div className="truncate">{m.agenda}</div>
+                        </td>
+                        <td className="max-w-[360px]">
+                          <div className="truncate">{m.notes}</div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1315,7 +1644,8 @@ Dashboard Version: v64
             </Button>
           </div>
           <div className="flex gap-2">
-            <Button onClick={saveProjectDataToDatabase} disabled={saving}>
+            <Button onClick={saveProjectDataToDatabase} disabled={saving} className="gap-2">
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               {saving ? "Saving…" : "Save to Supabase"}
             </Button>
             <Button variant="outline" onClick={loadProjectDataFromDatabase}>
