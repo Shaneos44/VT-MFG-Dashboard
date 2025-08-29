@@ -1,555 +1,513 @@
-"use client";
+'use client'
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
-import { Loader2, Plus, Trash2, FileText, X, Save } from "lucide-react";
-import { clone, SEED_PLAN } from "@/lib/constants";
-import AutoTextarea from "@/components/AutoTextarea";
-import OverviewPanel from "@/components/OverviewPanel";
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Button } from '@/components/ui/button'
+import { Loader2, Plus, Trash2, FileText, Calendar, Save, TrendingUp } from 'lucide-react'
+import jsPDF from 'jspdf'
+// @ts-ignore - types may not be present in some setups
+import autoTable from 'jspdf-autotable'
 
-type VariantName = "Recess Nanodispensing" | "Dipcoating" | string;
-type AnyRow = any[];
+/**
+ * ScaleUpDashboard
+ *
+ * - Full client component with:
+ *   • Tabs: Overview, Projects, Processes, Resources, Risks, Financials, Meetings, KPIs, Glossary
+ *   • Add/Delete row buttons on each tab
+ *   • Text wraps in table cells and columns are wide enough to avoid hidden text
+ *   • Autosaves ALL data (every tab) via /api/configurations (Supabase-backed) with debounce
+ *   • Loads saved data on mount and does not reset on refresh
+ *   • Meeting modal with agenda/notes & export meeting summary to PDF
+ *   • CEO Summary PDF button
+ */
+
+// ---------------- Types ----------------
+
+type AnyRow = (string | number | boolean | null | undefined)[]
 
 interface KPI {
-  id: string;
-  scenario_id: string;
-  name: string;
-  target_value: number;
-  current_value: number;
-  unit: string;
-  owner: string;
-  created_at: string;
-  updated_at: string;
+  id: string
+  name: string
+  unit: string
+  owner: string
+  current_value: number
+  target_value: number
 }
 
+interface SavedDataShape {
+  scenario: '50k' | '200k'
+  variant: string
+  projects: AnyRow[]
+  processes: AnyRow[]
+  resources: AnyRow[]
+  risks: AnyRow[]
+  financials: AnyRow[]
+  meetings: AnyRow[]
+  kpis: KPI[]
+  glossary: AnyRow[]
+  capex50k: AnyRow[]
+  capex200k: AnyRow[]
+  opex50k: AnyRow[]
+  opex200k: AnyRow[]
+  lastSaved?: string
+}
+
+// ---------------- Helpers ----------------
+
+const defaultKpis: KPI[] = [
+  { id: 'k1', name: 'Production Efficiency', unit: '%', owner: 'Production', current_value: 87, target_value: 95 },
+  { id: 'k2', name: 'Quality Score', unit: '%', owner: 'Quality', current_value: 94, target_value: 98 },
+  { id: 'k3', name: 'Cost Reduction', unit: '%', owner: 'Ops', current_value: 12, target_value: 15 },
+  { id: 'k4', name: 'Time to Market', unit: 'days', owner: 'PMO', current_value: 195, target_value: 180 },
+]
+
+const defaultProjects: AnyRow[] = [
+  [
+    `PROJ-${Date.now()}`,
+    'Pilot Line Commissioning',
+    'Manufacturing',
+    'Must',
+    'Project Manager',
+    new Date().toISOString().slice(0, 10),
+    new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+    '—',
+    'Pilot line validated for 50k units',
+    'Bring line to IQ/OQ/PQ readiness',
+    'R',
+    'A',
+    'C',
+    'I',
+    'Facilities, Vendors',
+    'Lead time bottlenecks',
+    'Supply risk',
+    45,
+    200000,
+    150000,
+    'https://docs.example.com/process',
+    false,
+    'GREEN',
+    20,
+  ],
+]
+
+const defaultProcesses: AnyRow[] = [
+  ['Receive Needles', 0, 1, 100, 0, 'Manual Station', 'Manual', 'Validated', 'Operator1'],
+  ['Plasma', 10, 90, 98, 600, 'Plasma System', 'Auto', 'Validated', 'Operator3'],
+]
+
+const defaultResources: AnyRow[] = [
+  ['Production Manager', 'Personnel', 1, 95000, 'Manufacturing', 'Full-time position'],
+  ['Quality Engineer', 'Personnel', 2, 75000, 'Quality', 'QC oversight'],
+]
+
+const defaultRisks: AnyRow[] = [
+  ['RISK-1', 'Supply Chain Disruption', 'H', 'M', 'Diversify suppliers', 'Operations', '2025-12-31', 'Open'],
+]
+
+const defaultFinancials: AnyRow[] = [
+  ['Revenue', 'Product Sales', 2250000, 'Income', 'Projected annual revenue'],
+  ['COGS', 'Manufacturing Costs', 1350000, 'Expense', 'Direct production costs'],
+  ['OpEx', 'Operating Expenses', 450000, 'Expense', 'Ongoing operational costs'],
+  ['CapEx', 'Equipment Investment', 750000, 'Investment', 'Initial capital expenditure'],
+]
+
+const defaultMeetings: AnyRow[] = [
+  ['MEET-1', 'Weekly Status', '2025-08-25', '10:00', '60 min', 'Project Team', 'Conference A', 'Scheduled', '1. Welcome', 'Review progress', 'Notes here', 'Project Team'],
+]
+
+const defaultGlossary: AnyRow[] = [
+  ['IHCL', 'Ion-Implanted Hydrophilic Coating Layer'],
+  ['OCP', 'Open Circuit Potential'],
+]
+
+const defaultCapex50k: AnyRow[] = [
+  ['Coating Unit', 1, 120000, 10000],
+  ['Inspection Station', 1, 50000, 5000],
+]
+
+const defaultCapex200k: AnyRow[] = [
+  ['Coating Unit', 2, 110000, 15000],
+  ['Inspection Station', 2, 48000, 8000],
+]
+
+const defaultOpex50k: AnyRow[] = [
+  ['Labor', 'per_year', 1, 350000],
+  ['Materials', 'per_unit', 50000, 12.5],
+]
+
+const defaultOpex200k: AnyRow[] = [
+  ['Labor', 'per_year', 1, 650000],
+  ['Materials', 'per_unit', 200000, 11.0],
+]
+
+const initialData: SavedDataShape = {
+  scenario: '50k',
+  variant: 'Recess Nanodispensing',
+  projects: defaultProjects,
+  processes: defaultProcesses,
+  resources: defaultResources,
+  risks: defaultRisks,
+  financials: defaultFinancials,
+  meetings: defaultMeetings,
+  kpis: defaultKpis,
+  glossary: defaultGlossary,
+  capex50k: defaultCapex50k,
+  capex200k: defaultCapex200k,
+  opex50k: defaultOpex50k,
+  opex200k: defaultOpex200k,
+}
+
+// ---------------- Component ----------------
+
 export default function ScaleUpDashboard() {
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Tabs
+  const [activeTab, setActiveTab] = useState<
+    'Overview' | 'Projects' | 'Processes' | 'Resources' | 'Risks' | 'Financials' | 'Meetings' | 'KPIs' | 'Glossary'
+  >('Overview')
 
-  const [scenario, setScenario] = useState<"50k" | "200k">("50k");
-  const [variant, setVariant] = useState<VariantName>("Recess Nanodispensing");
+  // Core state
+  const [scenario, setScenario] = useState<'50k' | '200k'>(initialData.scenario)
+  const [variant, setVariant] = useState<string>(initialData.variant)
 
-  const [plan, setPlan] = useState<any>(() => {
-    const p = clone(SEED_PLAN) || {};
-    if (!p.scenarios) {
-      p.scenarios = {
-        "50k": { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 },
-        "200k": { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 },
-      };
-    }
-    if (!p.products) p.products = {};
-    for (const sc of ["50k", "200k"] as const) {
-      p.products[sc] = p.products[sc] || {
-        projects: [],
-        processes: [],
-        capex50k: [],
-        capex200k: [],
-        opex50k: [],
-        opex200k: [],
-        resources: [],
-        risks: [],
-        meetings: [],
-        manufacturing: [],
-        launch: { fiftyK: new Date().toISOString(), twoHundredK: new Date().toISOString() },
-      };
-    }
-    if (!Array.isArray(p.kpis)) {
-      p.kpis = [
-        {
-          id: "kpi-1",
-          scenario_id: "default",
-          name: "Production Efficiency",
-          target_value: 95,
-          current_value: 87,
-          unit: "%",
-          owner: "Production Manager",
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        {
-          id: "kpi-2",
-          scenario_id: "default",
-          name: "Quality Score",
-          target_value: 98,
-          current_value: 94,
-          unit: "%",
-          owner: "Quality Engineer",
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-      ];
-    }
-    if (!Array.isArray(p.glossary)) {
-      p.glossary = [
-        ["IHCL", "Ion-Implanted Hydrophilic Coating Layer - Surface treatment process"],
-        ["OCP", "Open Circuit Potential - Electrochemical measurement technique"],
-      ];
-    }
-    if (typeof p.bufferPct !== "number") p.bufferPct = 0.15;
-    return p;
-  });
+  const [projects, setProjects] = useState<AnyRow[]>(initialData.projects)
+  const [processes, setProcesses] = useState<AnyRow[]>(initialData.processes)
+  const [resources, setResources] = useState<AnyRow[]>(initialData.resources)
+  const [risks, setRisks] = useState<AnyRow[]>(initialData.risks)
+  const [financials, setFinancials] = useState<AnyRow[]>(initialData.financials)
+  const [meetings, setMeetings] = useState<AnyRow[]>(initialData.meetings)
+  const [kpis, setKpis] = useState<KPI[]>(initialData.kpis)
+  const [glossary, setGlossary] = useState<AnyRow[]>(initialData.glossary)
 
-  const autoSaveRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const queueSave = useCallback(() => {
-    if (autoSaveRef.current) clearTimeout(autoSaveRef.current);
-    autoSaveRef.current = setTimeout(() => {
-      void saveProjectDataToDatabase();
-    }, 1200);
-  }, []);
+  const [capex50k, setCapex50k] = useState<AnyRow[]>(initialData.capex50k)
+  const [capex200k, setCapex200k] = useState<AnyRow[]>(initialData.capex200k)
+  const [opex50k, setOpex50k] = useState<AnyRow[]>(initialData.opex50k)
+  const [opex200k, setOpex200k] = useState<AnyRow[]>(initialData.opex200k)
 
-  const currentVariantData = useMemo(() => {
-    const base = plan?.products?.[scenario] || {
-      projects: [],
-      processes: [],
-      capex50k: [],
-      capex200k: [],
-      opex50k: [],
-      opex200k: [],
-      resources: [],
-      risks: [],
-      meetings: [],
-      manufacturing: [],
-      launch: { fiftyK: new Date().toISOString(), twoHundredK: new Date().toISOString() },
-    };
+  // UX state
+  const [loading, setLoading] = useState<boolean>(true)
+  const [saving, setSaving] = useState<boolean>(false)
+  const [error, setError] = useState<string | null>(null)
+  const [lastSaved, setLastSaved] = useState<string>('')
 
-    return {
-      ...base,
-      projectsCount: Array.isArray(base.projects) ? base.projects.length : 0,
-      processesCount: Array.isArray(base.processes) ? base.processes.length : 0,
-      manufacturingCount: Array.isArray(base.manufacturing) ? base.manufacturing.length : 0,
-      resourcesCount: Array.isArray(base.resources) ? base.resources.length : 0,
-      risksCount: Array.isArray(base.risks) ? base.risks.length : 0,
-    };
-  }, [plan, scenario]);
+  // Debounce ref
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const r = await fetch("/api/configurations", { method: "GET" });
-        if (!r.ok) {
-          if (r.status !== 401) {
-            try {
-              const data = await r.json();
-              setError(data?.error || `Load failed (${r.status})`);
-            } catch {
-              setError(`Load failed (${r.status})`);
-            }
-          }
-          return;
-        }
-        const rows = await r.json();
-        const cfg =
-          rows.find((x: any) => x.name === "ScaleUp-Dashboard-Config") ||
-          rows
-            .filter((x: any) => x?.data?.plan)
-            .sort((a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime())[0];
-
-        if (cfg?.data && !cancelled) {
-          const { plan: p, scenario: sc, variant: v } = cfg.data;
-          if (p) setPlan(p);
-          if (sc) setScenario(sc);
-          if (v) setVariant(v);
-        }
-      } catch (e: any) {
-        setError(e?.message || "Failed to load data.");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (loading) return;
-    queueSave();
-  }, [plan, scenario, variant, loading, queueSave]);
-
-  const saveProjectDataToDatabase = useCallback(async () => {
-    try {
-      setSaving(true);
-      const payload = {
-        name: "ScaleUp-Dashboard-Config",
-        description: "ScaleUp Dashboard Configuration",
-        data: { plan, scenario, variant },
-        modified_by: "user",
-        upsert: true,
-      };
-      const r = await fetch("/api/configurations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      if (!r.ok && r.status !== 401) {
-        try {
-          const data = await r.json();
-          setError(data?.error || `Save failed (${r.status})`);
-        } catch {
-          setError(`Save failed (${r.status})`);
-        }
-      }
-    } catch (e: any) {
-      setError(e?.message || "Save failed.");
-    } finally {
-      setSaving(false);
-    }
-  }, [plan, scenario, variant]);
-
-  const tabs = [
-    "Overview",
-    "Projects",
-    "Manufacturing",
-    "Resources",
-    "Risks",
-    "Meetings",
-    "KPIs",
-    "Financials",
-    "Glossary",
-    "Config",
-  ] as const;
-  const [activeTab, setActiveTab] = useState<(typeof tabs)[number]>("Overview");
-
-  const getProjects = (): AnyRow[] => (currentVariantData?.projects || []) as AnyRow[];
-  const setProjects = (rows: AnyRow[]) => {
-    setPlan((prev: any) => ({
-      ...prev,
-      products: {
-        ...prev.products,
-        [scenario]: { ...prev.products[scenario], projects: rows },
-      },
-    }));
-  };
-  const updateProjectCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getProjects()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setProjects(rows);
-  };
-  const addProject = () => {
-    const rows = [...getProjects()];
-    rows.unshift([
-      `PROJ-${Date.now()}`,
-      "New Project",
-      "Planning",
-      "Must",
-      "Owner",
-      new Date().toISOString().split("T")[0],
-      new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      0,
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-      0,
-      0,
-      0,
-      "",
-      "false",
-      "GREEN",
-      0,
-    ]);
-    setProjects(rows);
-  };
-  const deleteProject = (rowIndex: number) => {
-    const rows = [...getProjects()];
-    rows.splice(rowIndex, 1);
-    setProjects(rows);
-  };
-
-  const getProcesses = (): AnyRow[] => (currentVariantData?.processes || []) as AnyRow[];
-  const setProcesses = (rows: AnyRow[]) => {
-    setPlan((prev: any) => ({
-      ...prev,
-      products: { ...prev.products, [scenario]: { ...prev.products[scenario], processes: rows } },
-    }));
-  };
-  const updateProcessCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getProcesses()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setProcesses(rows);
-  };
-  const addProcess = () => {
-    const rows = [...getProcesses()];
-    rows.unshift(["New Process", 0, 1, 100, 0, "Equipment", "Manual", "Planning", "Owner"]);
-    setProcesses(rows);
-  };
-  const deleteProcess = (rowIndex: number) => {
-    const rows = [...getProcesses()];
-    rows.splice(rowIndex, 1);
-    setProcesses(rows);
-  };
-
-  const getResources = (): AnyRow[] => (currentVariantData?.resources || []) as AnyRow[];
-  const setResources = (rows: AnyRow[]) => {
-    setPlan((prev: any) => ({
-      ...prev,
-      products: { ...prev.products, [scenario]: { ...prev.products[scenario], resources: rows } },
-    }));
-  };
-  const updateResourceCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getResources()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setResources(rows);
-  };
-  const addResource = () => {
-    const rows = [...getResources()];
-    rows.unshift(["New Resource", "Personnel", 1, 0, "Department", "Notes"]);
-    setResources(rows);
-  };
-  const deleteResource = (rowIndex: number) => {
-    const rows = [...getResources()];
-    rows.splice(rowIndex, 1);
-    setResources(rows);
-  };
-
-  const getRisks = (): AnyRow[] => (currentVariantData?.risks || []) as AnyRow[];
-  const setRisks = (rows: AnyRow[]) => {
-    setPlan((prev: any) => ({
-      ...prev,
-      products: { ...prev.products, [scenario]: { ...prev.products[scenario], risks: rows } },
-    }));
-  };
-  const updateRiskCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getRisks()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setRisks(rows);
-  };
-  const addRisk = () => {
-    const rows = [...getRisks()];
-    rows.unshift([`RISK-${Date.now()}`, "New Risk", "M", "M", "Mitigation", "Owner", new Date().toISOString().split("T")[0], "Open"]);
-    setRisks(rows);
-  };
-  const deleteRisk = (rowIndex: number) => {
-    const rows = [...getRisks()];
-    rows.splice(rowIndex, 1);
-    setRisks(rows);
-  };
-
-  const getMeetings = (): AnyRow[] => (currentVariantData?.meetings || []) as AnyRow[];
-  const setMeetings = (rows: AnyRow[]) => {
-    setPlan((prev: any) => ({
-      ...prev,
-      products: { ...prev.products, [scenario]: { ...prev.products[scenario], meetings: rows } },
-    }));
-  };
-  const addMeetingRow = () => {
-    const rows = [...getMeetings()];
-    rows.unshift([
-      `MEET-${Date.now()}`,
-      "New Meeting",
-      new Date().toISOString().split("T")[0],
-      "10:00",
-      "60 min",
-      "Team",
-      "Location",
-      "Scheduled",
-      "Agenda items here",
-      "Meeting objectives",
-      "Notes / minutes here",
-      "Attendee1, Attendee2",
-    ]);
-    setMeetings(rows);
-  };
-  const updateMeetingCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getMeetings()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setMeetings(rows);
-  };
-  const deleteMeeting = (rowIndex: number) => {
-    const rows = [...getMeetings()];
-    rows.splice(rowIndex, 1);
-    setMeetings(rows);
-  };
-
-  const getCapexRows = (): AnyRow[] =>
-    (scenario === "50k" ? currentVariantData.capex50k : currentVariantData.capex200k) || [];
-  const setCapexRows = (rows: AnyRow[]) => {
-    setPlan((prev: any) => ({
-      ...prev,
-      products: {
-        ...prev.products,
-        [scenario]: {
-          ...prev.products[scenario],
-          ...(scenario === "50k" ? { capex50k: rows } : { capex200k: rows }),
-        },
-      },
-    }));
-  };
-  const updateCapexCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getCapexRows()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setCapexRows(rows);
-  };
-  const addCapex = () => {
-    const rows = [...getCapexRows()];
-    rows.unshift(["Item", 1, 0, 0]);
-    setCapexRows(rows);
-  };
-  const deleteCapex = (rowIndex: number) => {
-    const rows = [...getCapexRows()];
-    rows.splice(rowIndex, 1);
-    setCapexRows(rows);
-  };
-
-  const getOpexRows = (): AnyRow[] =>
-    (scenario === "50k" ? currentVariantData.opex50k : currentVariantData.opex200k) || [];
-  const setOpexRows = (rows: AnyRow[]) => {
-    setPlan((prev: any) => ({
-      ...prev,
-      products: {
-        ...prev.products,
-        [scenario]: {
-          ...prev.products[scenario],
-          ...(scenario === "50k" ? { opex50k: rows } : { opex200k: rows }),
-        },
-      },
-    }));
-  };
-  const updateOpexCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getOpexRows()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setOpexRows(rows);
-  };
-  const addOpex = () => {
-    const rows = [...getOpexRows()];
-    rows.unshift(["Line item", "per_unit", 1, 0]);
-    setOpexRows(rows);
-  };
-  const deleteOpex = (rowIndex: number) => {
-    const rows = [...getOpexRows()];
-    rows.splice(rowIndex, 1);
-    setOpexRows(rows);
-  };
-
-  const getKpis = (): KPI[] => (Array.isArray(plan?.kpis) ? plan.kpis : []) as KPI[];
-  const setKpis = (rows: KPI[]) => {
-    setPlan((prev: any) => ({ ...prev, kpis: rows }));
-  };
-  const addKpi = () => {
-    const rows = [...getKpis()];
-    rows.unshift({
-      id: `kpi-${Date.now()}`,
-      scenario_id: `scenario-${scenario}`,
-      name: "New KPI",
-      target_value: 100,
-      current_value: 0,
-      unit: "%",
-      owner: "Owner",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-    setKpis(rows);
-  };
-  const deleteKpi = (id: string) => {
-    const rows = getKpis().filter((k) => k.id !== id);
-    setKpis(rows);
-  };
-  const updateKpi = (id: string, patch: Partial<KPI>) => {
-    const rows = getKpis().map((k) => (k.id === id ? { ...k, ...patch, updated_at: new Date().toISOString() } : k));
-    setKpis(rows);
-  };
-
-  const getGlossary = (): AnyRow[] => (Array.isArray(plan?.glossary) ? plan.glossary : []);
-  const setGlossary = (rows: AnyRow[]) => setPlan((prev: any) => ({ ...prev, glossary: rows }));
-  const addGlossary = () => {
-    const rows = [...getGlossary()];
-    rows.unshift(["New Term", "Definition"]);
-    setGlossary(rows);
-  };
-  const deleteGlossary = (rowIndex: number) => {
-    const rows = [...getGlossary()];
-    rows.splice(rowIndex, 1);
-    setGlossary(rows);
-  };
-  const updateGlossaryCell = (rowIndex: number, colIndex: number, value: any) => {
-    const rows = [...getGlossary()];
-    if (!rows[rowIndex]) return;
-    rows[rowIndex] = [...rows[rowIndex]];
-    rows[rowIndex][colIndex] = value;
-    setGlossary(rows);
-  };
-
-  const [showMeetingModal, setShowMeetingModal] = useState(false);
-  const [editingMeetingIndex, setEditingMeetingIndex] = useState<number | null>(null);
+  // Meeting modal state
+  const [showMeetingModal, setShowMeetingModal] = useState(false)
+  const [editingMeetingIndex, setEditingMeetingIndex] = useState<number | null>(null)
   const [meetingForm, setMeetingForm] = useState({
-    id: "",
-    title: "New Meeting",
-    date: new Date().toISOString().split("T")[0],
-    time: "10:00",
-    duration: "60 min",
-    attendees: "Project Team, Stakeholders",
-    location: "Conference Room / Zoom",
-    status: "Scheduled",
-    agenda: "1. Welcome\n2. Updates\n3. Risks & Blockers\n4. Decisions\n5. Actions",
-    objectives: "Review progress and align priorities",
-    notes: "",
-  });
+    id: '',
+    title: 'New Meeting',
+    date: new Date().toISOString().slice(0, 10),
+    time: '10:00',
+    duration: '60 min',
+    attendees: 'Project Team, Stakeholders',
+    location: 'Conference Room / Zoom',
+    status: 'Scheduled',
+    agenda: '1. Welcome\n2. Updates\n3. Risks & Blockers\n4. Decisions\n5. Actions',
+    objectives: 'Review progress and align priorities',
+    notes: '',
+  })
+
+  // --------------- Derived & Metrics ---------------
+
+  const capexRows = scenario === '50k' ? capex50k : capex200k
+  const opexRows = scenario === '50k' ? opex50k : opex200k
+
+  const capexTotal = useMemo(
+    () => capexRows.reduce((s, r) => s + ((Number(r?.[1]) || 0) * (Number(r?.[2]) || 0) + (Number(r?.[3]) || 0)), 0),
+    [capexRows]
+  )
+
+  const opexTotal = useMemo(
+    () => opexRows.reduce((s, r) => s + ((Number(r?.[2]) || 0) * (Number(r?.[3]) || 0)), 0),
+    [opexRows]
+  )
+
+  const scenarioUnits = scenario === '50k' ? 50000 : 200000
+  const revenue = scenarioUnits * 45
+  const cpu = scenarioUnits ? opexTotal / scenarioUnits : 0
+  const grossProfit = revenue - (capexTotal + opexTotal)
+  const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0
+
+  // --------------- Persistence helpers ---------------
+
+  const buildPayload = useCallback((): SavedDataShape => ({
+    scenario,
+    variant,
+    projects,
+    processes,
+    resources,
+    risks,
+    financials,
+    meetings,
+    kpis,
+    glossary,
+    capex50k,
+    capex200k,
+    opex50k,
+    opex200k,
+    lastSaved: new Date().toISOString(),
+  }), [
+    scenario,
+    variant,
+    projects,
+    processes,
+    resources,
+    risks,
+    financials,
+    meetings,
+    kpis,
+    glossary,
+    capex50k,
+    capex200k,
+    opex50k,
+    opex200k,
+  ])
+
+  const saveToServer = useCallback(async () => {
+    try {
+      setSaving(true)
+      const body = {
+        name: 'ScaleUp-Dashboard-Config',
+        description: 'ScaleUp Dashboard Configuration',
+        data: buildPayload(),
+        modified_by: 'dashboard',
+      }
+      const res = await fetch('/api/configurations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}))
+        throw new Error(j?.error || `Save failed (${res.status})`)
+      }
+      const stamp = new Date().toLocaleString()
+      setLastSaved(stamp)
+      setError(null)
+    } catch (e: any) {
+      setError(e?.message || 'Failed to save')
+      console.error('[Save] error', e)
+    } finally {
+      setSaving(false)
+    }
+  }, [buildPayload])
+
+  const scheduleSave = useCallback(() => {
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(() => {
+      saveToServer()
+    }, 1200) // 1.2s debounce across the whole dashboard
+  }, [saveToServer])
+
+  const loadFromServer = useCallback(async () => {
+    try {
+      setLoading(true)
+      const res = await fetch('/api/configurations', { method: 'GET' })
+      if (!res.ok) {
+        // Keep defaults if unauthenticated; user will sign in
+        const j = await res.json().catch(() => ({}))
+        console.warn('[Load] not OK', res.status, j)
+        return
+      }
+      const rows = (await res.json()) as any[]
+      const found = rows?.find((r) => r?.name === 'ScaleUp-Dashboard-Config') || rows?.[0]
+      const data: SavedDataShape | undefined = found?.data
+      if (data && typeof data === 'object') {
+        setScenario((data.scenario as any) || '50k')
+        setVariant(data.variant || 'Recess Nanodispensing')
+        setProjects(Array.isArray(data.projects) ? data.projects : defaultProjects)
+        setProcesses(Array.isArray(data.processes) ? data.processes : defaultProcesses)
+        setResources(Array.isArray(data.resources) ? data.resources : defaultResources)
+        setRisks(Array.isArray(data.risks) ? data.risks : defaultRisks)
+        setFinancials(Array.isArray(data.financials) ? data.financials : defaultFinancials)
+        setMeetings(Array.isArray(data.meetings) ? data.meetings : defaultMeetings)
+        setKpis(Array.isArray(data.kpis) ? data.kpis : defaultKpis)
+        setGlossary(Array.isArray(data.glossary) ? data.glossary : defaultGlossary)
+        setCapex50k(Array.isArray(data.capex50k) ? data.capex50k : defaultCapex50k)
+        setCapex200k(Array.isArray(data.capex200k) ? data.capex200k : defaultCapex200k)
+        setOpex50k(Array.isArray(data.opex50k) ? data.opex50k : defaultOpex50k)
+        setOpex200k(Array.isArray(data.opex200k) ? data.opex200k : defaultOpex200k)
+        setLastSaved(data.lastSaved || '')
+      }
+    } catch (e) {
+      console.warn('[Load] error', e)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadFromServer()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Autosave when anything important changes
+  useEffect(() => {
+    if (loading) return
+    scheduleSave()
+  }, [
+    loading,
+    scenario,
+    variant,
+    projects,
+    processes,
+    resources,
+    risks,
+    financials,
+    meetings,
+    kpis,
+    glossary,
+    capex50k,
+    capex200k,
+    opex50k,
+    opex200k,
+    scheduleSave,
+  ])
+
+  // --------------- UI helpers ---------------
+
+  const addRow = (which: string) => {
+    switch (which) {
+      case 'projects':
+        setProjects((prev) => [
+          [
+            `PROJ-${Date.now()}`,
+            'New Project',
+            'Planning',
+            'Must',
+            'Owner',
+            new Date().toISOString().slice(0, 10),
+            new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10),
+            '',
+            'Deliverables',
+            'Objectives',
+            'R',
+            'A',
+            'C',
+            'I',
+            'needs',
+            'barriers',
+            'risks',
+            0,
+            0,
+            0,
+            '',
+            false,
+            'GREEN',
+            0,
+          ],
+          ...prev,
+        ])
+        break
+      case 'processes':
+        setProcesses((prev) => [['New Process', 0, 1, 100, 0, 'Manual Station', 'Manual', 'Planning', 'Operator'], ...prev])
+        break
+      case 'resources':
+        setResources((prev) => [['New Resource', 'Personnel', 1, 0, 'Department', ''], ...prev])
+        break
+      case 'risks':
+        setRisks((prev) => [[`RISK-${Date.now()}`, 'New Risk', 'M', 'M', 'Mitigation', 'Owner', new Date().toISOString().slice(0, 10), 'Open'], ...prev])
+        break
+      case 'financials':
+        setFinancials((prev) => [['Category', 'Item', 0, 'Expense', ''], ...prev])
+        break
+      case 'meetings':
+        openNewMeetingModal()
+        break
+      case 'kpis':
+        setKpis((prev) => [...prev, { id: `k-${Date.now()}`, name: 'New KPI', unit: '%', owner: 'Owner', current_value: 0, target_value: 100 }])
+        break
+      case 'glossary':
+        setGlossary((prev) => [['New Term', 'Definition'], ...prev])
+        break
+      default:
+        break
+    }
+  }
+
+  const deleteRow = (which: string, index: number) => {
+    switch (which) {
+      case 'projects':
+        setProjects((prev) => prev.filter((_, i) => i !== index))
+        break
+      case 'processes':
+        setProcesses((prev) => prev.filter((_, i) => i !== index))
+        break
+      case 'resources':
+        setResources((prev) => prev.filter((_, i) => i !== index))
+        break
+      case 'risks':
+        setRisks((prev) => prev.filter((_, i) => i !== index))
+        break
+      case 'financials':
+        setFinancials((prev) => prev.filter((_, i) => i !== index))
+        break
+      case 'meetings':
+        setMeetings((prev) => prev.filter((_, i) => i !== index))
+        break
+      case 'kpis':
+        setKpis((prev) => prev.filter((_, i) => i !== index))
+        break
+      case 'glossary':
+        setGlossary((prev) => prev.filter((_, i) => i !== index))
+        break
+      default:
+        break
+    }
+  }
+
+  const updateCell = (setter: React.Dispatch<React.SetStateAction<AnyRow[]>>, rowIndex: number, colIndex: number, value: any) => {
+    setter((prev) => {
+      const next = prev.map((r, i) => (i === rowIndex ? r.map((c, j) => (j === colIndex ? value : c)) : r))
+      return next
+    })
+  }
+
+  const updateKpiCell = (rowIndex: number, key: keyof KPI, value: any) => {
+    setKpis((prev) => prev.map((k, i) => (i === rowIndex ? { ...k, [key]: key.includes('value') ? Number(value) || 0 : value } : k)))
+  }
+
+  // --------------- PDF: Meeting Summary ---------------
 
   const openNewMeetingModal = () => {
-    setEditingMeetingIndex(null);
+    setEditingMeetingIndex(null)
     setMeetingForm({
       id: `MEET-${Date.now()}`,
-      title: "New Meeting",
-      date: new Date().toISOString().split("T")[0],
-      time: "10:00",
-      duration: "60 min",
-      attendees: "Project Team, Stakeholders",
-      location: "Conference Room / Zoom",
-      status: "Scheduled",
-      agenda: "1. Welcome\n2. Updates\n3. Risks & Blockers\n4. Decisions\n5. Actions",
-      objectives: "Review progress and align priorities",
-      notes: "",
-    });
-    setShowMeetingModal(true);
-  };
+      title: 'New Meeting',
+      date: new Date().toISOString().slice(0, 10),
+      time: '10:00',
+      duration: '60 min',
+      attendees: 'Project Team, Stakeholders',
+      location: 'Conference Room / Zoom',
+      status: 'Scheduled',
+      agenda: '1. Welcome\n2. Updates\n3. Risks & Blockers\n4. Decisions\n5. Actions',
+      objectives: 'Review progress and align priorities',
+      notes: '',
+    })
+    setShowMeetingModal(true)
+  }
 
   const openEditMeetingModal = (rowIndex: number) => {
-    const row = getMeetings()[rowIndex] || [];
-    setEditingMeetingIndex(rowIndex);
+    const row = meetings[rowIndex] || []
+    setEditingMeetingIndex(rowIndex)
     setMeetingForm({
       id: String(row[0] || `MEET-${Date.now()}`),
-      title: String(row[1] || "Meeting"),
-      date: String(row[2] || new Date().toISOString().split("T")[0]),
-      time: String(row[3] || "10:00"),
-      duration: String(row[4] || "60 min"),
-      attendees: String(row[10] || row[5] || "Team"),
-      location: String(row[6] || "Location"),
-      status: String(row[7] || "Scheduled"),
-      agenda: String(row[8] || "Agenda items"),
-      objectives: String(row[9] || "Objectives"),
-      notes: String(row[10] || row[11] || "Notes"),
-    });
-    setShowMeetingModal(true);
-  };
+      title: String(row[1] || 'Meeting'),
+      date: String(row[2] || new Date().toISOString().slice(0, 10)),
+      time: String(row[3] || '10:00'),
+      duration: String(row[4] || '60 min'),
+      attendees: String(row[5] || 'Team'),
+      location: String(row[6] || 'Location'),
+      status: String(row[7] || 'Scheduled'),
+      agenda: String(row[8] || 'Agenda'),
+      objectives: String(row[9] || 'Objectives'),
+      notes: String(row[10] || 'Notes'),
+    })
+    setShowMeetingModal(true)
+  }
 
   const saveMeetingFromModal = () => {
-    const rows = [...getMeetings()];
     const newRow: AnyRow = [
       meetingForm.id,
       meetingForm.title,
@@ -563,1422 +521,752 @@ export default function ScaleUpDashboard() {
       meetingForm.objectives,
       meetingForm.notes,
       meetingForm.attendees,
-    ];
-    if (editingMeetingIndex === null) {
-      rows.unshift(newRow);
-    } else {
-      rows[editingMeetingIndex] = newRow;
-    }
-    setMeetings(rows);
-    setShowMeetingModal(false);
-    setEditingMeetingIndex(null);
-  };
+    ]
+
+    setMeetings((prev) => {
+      if (editingMeetingIndex === null) return [newRow, ...prev]
+      const next = [...prev]
+      next[editingMeetingIndex] = newRow
+      return next
+    })
+    setShowMeetingModal(false)
+    setEditingMeetingIndex(null)
+  }
 
   const exportMeetingSummary = (rowIndex: number) => {
-    const row = getMeetings()[rowIndex] || [];
-    const title = String(row[1] || "Meeting");
-    const date = String(row[2] || "");
-    const time = String(row[3] || "");
-    const duration = String(row[4] || "");
-    const attendees = String(row[10] || row[5] || "");
-    const location = String(row[6] || "");
-    const status = String(row[7] || "");
-    const agenda = String(row[8] || "");
-    const objectives = String(row[9] || "");
-    const notes = String(row[10] || row[11] || "");
+    const row = meetings[rowIndex] || []
+    const title = String(row[1] || 'Meeting')
+    const date = String(row[2] || '')
+    const time = String(row[3] || '')
+    const duration = String(row[4] || '')
+    const attendees = String(row[5] || '')
+    const location = String(row[6] || '')
+    const status = String(row[7] || '')
+    const agenda = String(row[8] || '')
+    const objectives = String(row[9] || '')
+    const notes = String(row[10] || '')
 
-    const doc = new jsPDF({ unit: "pt", format: "a4" });
-    const left = 40;
-    let y = 50;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' })
+    const left = 40
+    let y = 56
 
-    doc.setFontSize(16);
-    doc.text(`Meeting Summary — ${title}`, left, y);
-    y += 20;
-    doc.setFontSize(11);
-    doc.text(`Date: ${date}   Time: ${time}   Duration: ${duration}`, left, y);
-    y += 16;
-    doc.text(`Location: ${location}`, left, y);
-    y += 16;
-    doc.text(`Attendees: ${attendees}`, left, y);
-    y += 16;
-    doc.text(`Status: ${status}`, left, y);
-    y += 24;
+    doc.setFontSize(16)
+    doc.text(`Meeting Summary — ${title}`, left, y)
+    y += 18
+
+    doc.setFontSize(11)
+    doc.text(`Date: ${date}    Time: ${time}    Duration: ${duration}`, left, y)
+    y += 16
+    doc.text(`Location: ${location}`, left, y)
+    y += 16
+    doc.text(`Attendees: ${attendees}`, left, y)
+    y += 16
+    doc.text(`Status: ${status}`, left, y)
+    y += 20
 
     autoTable(doc, {
       startY: y,
-      head: [["Section", "Details"]],
+      head: [['Section', 'Details']],
       body: [
-        ["Objectives", objectives],
-        ["Agenda", agenda],
-        ["Notes / Minutes", notes],
-        ["Actions (if any)", ""],
+        ['Objectives', objectives],
+        ['Agenda', agenda],
+        ['Notes / Minutes', notes],
       ],
-      styles: { fontSize: 10, cellPadding: 6, valign: "top" },
+      styles: { fontSize: 10, cellPadding: 6, valign: 'top' },
       headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 140 },
-        1: { cellWidth: 380 },
-      },
+      columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 380 } },
       margin: { left },
-      theme: "striped",
-    });
+      theme: 'striped',
+    })
 
-    doc.save(`Meeting_${title.replace(/\s+/g, "_")}_${date}.pdf`);
-  };
+    doc.save(`Meeting_${title.replace(/\s+/g, '_')}_${date}.pdf`)
+  }
 
+  // --------------- PDF: CEO Summary ---------------
   function sumCapexTotal(rows: AnyRow[]): number {
     return rows.reduce((sum, r) => {
-      const qty = Number(r?.[1]) || 0;
-      const unit = Number(r?.[2]) || 0;
-      const install = Number(r?.[3]) || 0;
-      return sum + qty * unit + install;
-    }, 0);
+      const qty = Number(r?.[1]) || 0
+      const unit = Number(r?.[2]) || 0
+      const install = Number(r?.[3]) || 0
+      return sum + qty * unit + install
+    }, 0)
   }
 
   function sumOpexTotal(rows: AnyRow[]): number {
     return rows.reduce((sum, r) => {
-      const qty = Number(r?.[2]) || 0;
-      const unit = Number(r?.[3]) || 0;
-      return sum + qty * unit;
-    }, 0);
+      const qty = Number(r?.[2]) || 0
+      const unit = Number(r?.[3]) || 0
+      return sum + qty * unit
+    }, 0)
   }
 
   const generateCEOReportPDF = () => {
-    const doc = new jsPDF({ unit: "pt", format: "a4" });
-    const left = 40;
-    let y = 56;
+    const doc = new jsPDF({ unit: 'pt', format: 'a4' })
+    const left = 40
+    let y = 56
 
-    const projects = getProjects();
-    const processes = getProcesses();
-    const risks = getRisks();
-    const kpis = getKpis();
+    const capex = sumCapexTotal(capexRows)
+    const opex = sumOpexTotal(opexRows)
+    const units = scenarioUnits
+    const pricePerUnit = 45
+    const rev = units * pricePerUnit
+    const cpuLocal = units ? opex / units : 0
+    const gp = rev - (capex + opex)
+    const margin = rev > 0 ? (gp / rev) * 100 : 0
 
-    const capexRows = scenario === "50k" ? currentVariantData.capex50k || [] : currentVariantData.capex200k || [];
-    const opexRows = scenario === "50k" ? currentVariantData.opex50k || [] : currentVariantData.opex200k || [];
-
-    const capexTotal = sumCapexTotal(capexRows);
-    const opexTotal = sumOpexTotal(opexRows);
-
-    const sc = plan?.scenarios?.[scenario] || { unitsPerYear: scenario === "50k" ? 50000 : 200000, hoursPerDay: 8, shifts: 1 };
-    const pricePerUnit = 45;
-    const revenue = (sc.unitsPerYear || 0) * pricePerUnit;
-    const cpu = sc.unitsPerYear ? opexTotal / sc.unitsPerYear : 0;
-    const grossProfit = revenue - (capexTotal + opexTotal);
-    const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
-
-    const totalProjects = projects.length;
-    const completedProjects = projects.filter((p) => (Number(p?.[19]) || 0) >= 100).length;
-    const statusCol = 22;
-    const onTrack = projects.filter((p) => String(p?.[statusCol] || "").toUpperCase() === "GREEN").length;
+    const totalProjects = projects.length
+    const completed = projects.filter((p) => (Number(p?.[17]) || 0) >= 100).length
+    const onTrack = projects.filter((p) => String(p?.[22] || '').toUpperCase() === 'GREEN').length
     const atRisk = projects.filter((p) => {
-      const s = String(p?.[statusCol] || "").toUpperCase();
-      return s === "RED" || s === "AMBER";
-    }).length;
+      const s = String(p?.[22] || '').toUpperCase()
+      return s === 'AMBER' || s === 'RED'
+    }).length
 
-    const avgKpiPerformance =
-      kpis.length > 0
-        ? kpis.reduce((acc, k) => acc + (k.target_value ? (k.current_value / k.target_value) * 100 : 0), 0) / kpis.length
-        : 0;
+    const avgKpi = kpis.length
+      ? kpis.reduce((acc, k) => acc + (k.target_value ? (k.current_value / k.target_value) * 100 : 0), 0) / kpis.length
+      : 0
 
-    doc.setFontSize(18);
-    doc.text(`CEO Executive Summary — ${variant} / ${scenario}`, left, y);
-    y += 20;
-    doc.setFontSize(11);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, left, y);
-    y += 18;
+    doc.setFontSize(18)
+    doc.text(`CEO Executive Summary — ${variant} / ${scenario}`, left, y)
+    y += 20
+    doc.setFontSize(11)
+    doc.text(`Generated: ${new Date().toLocaleString()}`, left, y)
+    y += 18
 
     autoTable(doc, {
       startY: y,
-      head: [["Metric", "Value"]],
+      head: [['Metric', 'Value']],
       body: [
-        ["Target Output (units/yr)", (sc.unitsPerYear || 0).toLocaleString()],
-        ["CapEx Total (USD)", `$${capexTotal.toLocaleString()}`],
-        ["OpEx Total (USD)", `$${opexTotal.toLocaleString()}`],
-        ["Cost / Unit (OpEx only)", `$${cpu.toFixed(2)}`],
-        ["Revenue (USD, est.)", `$${revenue.toLocaleString()}`],
-        ["Gross Profit (USD, est.)", `$${grossProfit.toLocaleString()}`],
-        ["Profit Margin (%)", `${marginPct.toFixed(1)}%`],
-        ["Projects — Total / Completed / On-Track / At-Risk", `${totalProjects} / ${completedProjects} / ${onTrack} / ${atRisk}`],
-        ["KPIs — Avg Performance", `${avgKpiPerformance.toFixed(1)}%`],
-        ["Risks — Total", `${risks.length}`],
+        ['Target Output (units/yr)', units.toLocaleString()],
+        ['CapEx Total (USD)', `$${capex.toLocaleString()}`],
+        ['OpEx Total (USD)', `$${opex.toLocaleString()}`],
+        ['Cost / Unit (OpEx only)', `$${cpuLocal.toFixed(2)}`],
+        ['Revenue (USD, est.)', `$${rev.toLocaleString()}`],
+        ['Gross Profit (USD, est.)', `$${gp.toLocaleString()}`],
+        ['Profit Margin (%)', `${margin.toFixed(1)}%`],
+        ['Projects — Total / Completed / On-Track / At-Risk', `${totalProjects} / ${completed} / ${onTrack} / ${atRisk}`],
+        ['KPIs — Avg Performance', `${avgKpi.toFixed(1)}%`],
+        ['Risks — Total', `${risks.length}`],
       ],
-      styles: { fontSize: 10, cellPadding: 6, valign: "top" },
+      styles: { fontSize: 10, cellPadding: 6, valign: 'top' },
       headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 260 },
-        1: { cellWidth: 260 },
-      },
+      columnStyles: { 0: { cellWidth: 260 }, 1: { cellWidth: 260 } },
       margin: { left },
-      theme: "grid",
-    });
+      theme: 'grid',
+    })
 
-    let afterSummaryY = (doc as any).lastAutoTable.finalY + 24;
+    let afterY = (doc as any).lastAutoTable.finalY + 22
 
     autoTable(doc, {
-      startY: afterSummaryY,
-      head: [["KPI", "Current", "Target", "Δ Var (%)", "Owner"]],
+      startY: afterY,
+      head: [['KPI', 'Current', 'Target', 'Δ Var (%)', 'Owner']],
       body: kpis.map((k) => [
         k.name,
         `${k.current_value} ${k.unit}`,
         `${k.target_value} ${k.unit}`,
-        k.target_value ? (((k.current_value - k.target_value) / k.target_value) * 100).toFixed(1) : "0.0",
+        k.target_value ? (((k.current_value - k.target_value) / k.target_value) * 100).toFixed(1) : '0.0',
         k.owner,
       ]),
       styles: { fontSize: 9, cellPadding: 5 },
       headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 220 },
-        1: { cellWidth: 100 },
-        2: { cellWidth: 100 },
-        3: { cellWidth: 80 },
-        4: { cellWidth: 120 },
-      },
+      columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 100 }, 2: { cellWidth: 100 }, 3: { cellWidth: 80 }, 4: { cellWidth: 120 } },
       margin: { left },
-      theme: "striped",
+      theme: 'striped',
       didDrawPage: (data) => {
-        doc.setFontSize(12);
-        doc.text("KPI Dashboard", left, data.settings.startY - 8);
+        doc.setFontSize(12)
+        doc.text('KPI Dashboard', left, data.settings.startY - 8)
       },
-    });
+    })
 
-    let afterKpiY = (doc as any).lastAutoTable.finalY + 24;
+    afterY = (doc as any).lastAutoTable.finalY + 22
 
     const projectBody = projects.slice(0, 20).map((p) => [
-      String(p?.[1] || ""),
-      String(p?.[4] || ""),
-      String(p?.[6] || ""),
-      String(p?.[22] || ""),
-      `${Number(p?.[19] || 0)}%`,
-    ]);
+      String(p?.[1] || ''),
+      String(p?.[4] || ''),
+      String(p?.[6] || ''),
+      String(p?.[22] || ''),
+      `${Number(p?.[17] || 0)}%`,
+    ])
 
     autoTable(doc, {
-      startY: afterKpiY,
-      head: [["Project", "Owner", "Finish", "Status", "Progress"]],
+      startY: afterY,
+      head: [['Project', 'Owner', 'Finish', 'Status', 'Progress']],
       body: projectBody,
-      styles: { fontSize: 9, cellPadding: 5, overflow: "linebreak" },
+      styles: { fontSize: 9, cellPadding: 5, overflow: 'linebreak' },
       headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 240 },
-        1: { cellWidth: 120 },
-        2: { cellWidth: 90 },
-        3: { cellWidth: 80 },
-        4: { cellWidth: 50 },
-      },
+      columnStyles: { 0: { cellWidth: 240 }, 1: { cellWidth: 120 }, 2: { cellWidth: 90 }, 3: { cellWidth: 80 }, 4: { cellWidth: 50 } },
       margin: { left },
-      theme: "striped",
+      theme: 'striped',
       didDrawPage: (data) => {
-        doc.setFontSize(12);
-        doc.text("Top Projects", left, data.settings.startY - 8);
+        doc.setFontSize(12)
+        doc.text('Top Projects', left, data.settings.startY - 8)
       },
-    });
+    })
 
-    let afterProjectsY = (doc as any).lastAutoTable.finalY + 24;
+    const fileName = `CEO_Summary_${variant.replace(/\s+/g, '_')}_${scenario}_${new Date().toISOString().slice(0, 10)}.pdf`
+    doc.save(fileName)
+  }
 
-    const riskBody = risks.slice(0, 15).map((r) => [
-      String(r?.[0] || ""),
-      String(r?.[1] || ""),
-      String(r?.[2] || ""),
-      String(r?.[3] || ""),
-      String(r?.[4] || ""),
-      String(r?.[5] || ""),
-      String(r?.[7] || ""),
-    ]);
-
-    autoTable(doc, {
-      startY: afterProjectsY,
-      head: [["ID", "Risk", "Impact", "Prob", "Mitigation", "Owner", "Status"]],
-      body: riskBody,
-      styles: { fontSize: 9, cellPadding: 5, overflow: "linebreak" },
-      headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 70 },
-        1: { cellWidth: 210 },
-        2: { cellWidth: 60 },
-        3: { cellWidth: 60 },
-        4: { cellWidth: 180 },
-        5: { cellWidth: 80 },
-        6: { cellWidth: 60 },
-      },
-      margin: { left },
-      theme: "striped",
-      didDrawPage: (data) => {
-        doc.setFontSize(12);
-        doc.text("Key Risks", left, data.settings.startY - 8);
-      },
-    });
-
-    const fileName = `CEO_Summary_${variant.replace(/\s+/g, "_")}_${scenario}_${new Date()
-      .toISOString()
-      .slice(0, 10)}.pdf`;
-    doc.save(fileName);
-  };
+  // --------------- Rendering ---------------
 
   if (loading) {
     return (
-      <div className="min-h-[50vh] grid place-items-center">
-        <div className="flex items-center gap-2 text-slate-600">
-          <Loader2 className="h-5 w-5 animate-spin" />
-          <span>Loading your dashboard…</span>
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="text-center space-y-2">
+          <div className="flex items-center justify-center gap-2">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            <span className="text-lg">Loading your data…</span>
+          </div>
+          <div className="text-sm text-slate-500">If you have just signed in, your saved configuration will appear.</div>
         </div>
       </div>
-    );
+    )
   }
 
-  const projectHeaders = [
-    "id",
-    "name",
-    "type",
-    "moscow",
-    "owner",
-    "start",
-    "finish",
-    "dependencies",
-    "deliverables",
-    "goal",
-    "R",
-    "A",
-    "C",
-    "I",
-    "needs",
-    "barriers",
-    "risks",
-    "budget_capex",
-    "budget_opex",
-    "percent_complete",
-    "process_link",
-    "critical",
-    "status",
-    "slack_days",
-  ];
-
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Scale-Up Dashboard</h1>
-          <p className="text-sm text-slate-500">
-            Variant:&nbsp;
+    <div className="p-4 md:p-6 space-y-4">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold">Manufacturing Scale-Up Dashboard</h1>
+          <div className="text-sm text-slate-500">
+            Scenario:
             <select
-              className="rounded-md border bg-background px-2 py-1 text-sm"
-              value={variant}
-              onChange={(e) => setVariant(e.target.value)}
-            >
-              <option>Recess Nanodispensing</option>
-              <option>Dipcoating</option>
-            </select>
-            &nbsp;• Scenario:&nbsp;
-            <select
-              className="rounded-md border bg-background px-2 py-1 text-sm"
               value={scenario}
-              onChange={(e) => setScenario(e.target.value as any)}
+              onChange={(e) => setScenario(e.target.value as '50k' | '200k')}
+              className="ml-2 border rounded px-2 py-1 text-sm"
             >
               <option value="50k">50k</option>
               <option value="200k">200k</option>
             </select>
-          </p>
+            <span className="ml-4">Variant:</span>
+            <input
+              value={variant}
+              onChange={(e) => setVariant(e.target.value)}
+              className="ml-2 border rounded px-2 py-1 text-sm w-64"
+            />
+          </div>
+          <div className="text-xs text-slate-500">
+            {saving ? 'Saving…' : lastSaved ? `Last saved: ${lastSaved}` : 'Not yet saved'}
+            {error ? <span className="ml-2 text-red-600">{error}</span> : null}
+          </div>
         </div>
-
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" onClick={() => saveProjectDataToDatabase()} className="gap-2">
+          <Button variant="secondary" onClick={saveToServer} className="gap-2">
             <Save className="h-4 w-4" /> Save now
           </Button>
           <Button onClick={generateCEOReportPDF} className="gap-2">
-            <FileText className="h-4 w-4" />
-            CEO Summary
+            <TrendingUp className="h-4 w-4" /> CEO Summary PDF
           </Button>
-          {saving ? (
-            <span className="inline-flex items-center gap-1 rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-600">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…
-            </span>
-          ) : (
-            <span className="rounded-md bg-emerald-50 px-2 py-1 text-xs text-emerald-700">All changes saved</span>
-          )}
-          {error ? <span className="rounded-md bg-rose-50 px-2 py-1 text-xs text-rose-600">Error: {error}</span> : null}
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {tabs.map((t) => (
-          <button
-            key={t}
-            onClick={() => setActiveTab(t)}
-            className={`rounded-full border px-3 py-1 text-sm ${
-              activeTab === t ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-700"
-            }`}
-          >
-            {t}
-          </button>
-        ))}
+      {/* Tabs */}
+      <div className="border-b border-slate-200">
+        <nav className="-mb-px flex flex-wrap gap-2">
+          {['Overview','Projects','Processes','Resources','Risks','Financials','Meetings','KPIs','Glossary'].map((t) => (
+            <button
+              key={t}
+              onClick={() => setActiveTab(t as any)}
+              className={`px-3 py-2 text-sm border-b-2 ${activeTab === t ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-500 hover:text-slate-700'}`}
+            >
+              {t}
+            </button>
+          ))}
+        </nav>
       </div>
 
-      <div className="rounded-2xl border p-4 shadow-sm">
-        {activeTab === "Overview" && (
-          <OverviewPanel
-            scenario={scenario}
-            variant={variant}
-            projects={currentVariantData.projects || []}
-            processes={currentVariantData.processes || []}
-            capexRows={scenario === "50k" ? currentVariantData.capex50k || [] : currentVariantData.capex200k || []}
-            opexRows={scenario === "50k" ? currentVariantData.opex50k || [] : currentVariantData.opex200k || []}
-            kpis={getKpis()}
-            planScenarios={plan?.scenarios}
-          />
-        )}
+      {/* Content */}
+      {activeTab === 'Overview' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="p-4 rounded-lg border bg-white">
+            <div className="text-sm text-slate-500">Target Output</div>
+            <div className="text-2xl font-semibold">{scenarioUnits.toLocaleString()} units/yr</div>
+          </div>
+          <div className="p-4 rounded-lg border bg-white">
+            <div className="text-sm text-slate-500">Cost / Unit (OpEx only)</div>
+            <div className="text-2xl font-semibold">${cpu.toFixed(2)}</div>
+          </div>
+          <div className="p-4 rounded-lg border bg-white">
+            <div className="text-sm text-slate-500">Profit Margin</div>
+            <div className="text-2xl font-semibold">{marginPct.toFixed(1)}%</div>
+          </div>
 
-        {activeTab === "Projects" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">Projects</h2>
-              <Button onClick={addProject} className="gap-2">
-                <Plus className="h-4 w-4" /> Add Project
-              </Button>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="dashboard-table w-full text-sm">
-                <thead>
-                  <tr className="text-left">
-                    {projectHeaders.map((h) => (
-                      <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                        {h}
-                      </th>
-                    ))}
-                    <th className="px-2 py-2" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {getProjects().map((row, rIdx) => (
-                    <tr key={rIdx} className="border-t align-top">
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[0] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 0, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[240px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[1] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 1, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[160px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[2] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 2, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[3] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 3, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[160px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[4] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 4, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[150px]">
-                        <input
-                          type="date"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[5] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 5, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[150px]">
-                        <input
-                          type="date"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[6] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 6, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[7] ?? 0}
-                          onChange={(e) => updateProjectCell(rIdx, 7, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[260px]">
-                        <AutoTextarea value={row[8] ?? ""} onChange={(v) => updateProjectCell(rIdx, 8, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[260px]">
-                        <AutoTextarea value={row[9] ?? ""} onChange={(v) => updateProjectCell(rIdx, 9, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[60px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[10] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 10, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[60px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[11] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 11, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[60px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[12] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 12, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[60px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[13] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 13, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[240px]">
-                        <AutoTextarea value={row[14] ?? ""} onChange={(v) => updateProjectCell(rIdx, 14, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[240px]">
-                        <AutoTextarea value={row[15] ?? ""} onChange={(v) => updateProjectCell(rIdx, 15, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[240px]">
-                        <AutoTextarea value={row[16] ?? ""} onChange={(v) => updateProjectCell(rIdx, 16, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[17] ?? 0}
-                          onChange={(e) => updateProjectCell(rIdx, 17, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[18] ?? 0}
-                          onChange={(e) => updateProjectCell(rIdx, 18, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[19] ?? 0}
-                          onChange={(e) => updateProjectCell(rIdx, 19, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[240px]">
-                        <AutoTextarea value={row[20] ?? ""} onChange={(v) => updateProjectCell(rIdx, 20, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[100px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[21] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 21, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[22] ?? ""}
-                          onChange={(e) => updateProjectCell(rIdx, 22, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[23] ?? 0}
-                          onChange={(e) => updateProjectCell(rIdx, 23, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[64px]">
-                        <button
-                          onClick={() => deleteProject(rIdx)}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                          title="Delete row"
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-600" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="p-4 rounded-lg border bg-white">
+            <div className="text-sm text-slate-500">Projects — Total / On-Track / At-Risk</div>
+            <div className="text-2xl font-semibold">
+              {projects.length} / {projects.filter((p) => String(p?.[22] || '').toUpperCase() === 'GREEN').length} / {
+                projects.filter((p) => ['AMBER', 'RED'].includes(String(p?.[22] || '').toUpperCase())).length
+              }
             </div>
           </div>
-        )}
-
-        {activeTab === "Manufacturing" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">Manufacturing Processes</h2>
-              <Button onClick={addProcess} className="gap-2">
-                <Plus className="h-4 w-4" /> Add Process
-              </Button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="dashboard-table w-full text-sm">
-                <thead>
-                  <tr className="text-left">
-                    {["name", "ct_min", "batch_size", "yield", "takt_target_s", "equipment_family", "automation_level", "validation_stage", "owner", ""].map(
-                      (h) => (
-                        <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                          {h}
-                        </th>
-                      ),
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {getProcesses().map((row, rIdx) => (
-                    <tr key={rIdx} className="border-t">
-                      <td className="px-2 py-2 min-w-[220px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[0] ?? ""}
-                          onChange={(e) => updateProcessCell(rIdx, 0, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[1] ?? 0}
-                          onChange={(e) => updateProcessCell(rIdx, 1, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[2] ?? 0}
-                          onChange={(e) => updateProcessCell(rIdx, 2, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[3] ?? 0}
-                          onChange={(e) => updateProcessCell(rIdx, 3, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[4] ?? 0}
-                          onChange={(e) => updateProcessCell(rIdx, 4, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[180px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[5] ?? ""}
-                          onChange={(e) => updateProcessCell(rIdx, 5, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[160px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[6] ?? ""}
-                          onChange={(e) => updateProcessCell(rIdx, 6, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[160px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[7] ?? ""}
-                          onChange={(e) => updateProcessCell(rIdx, 7, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[160px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[8] ?? ""}
-                          onChange={(e) => updateProcessCell(rIdx, 8, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[64px]">
-                        <button
-                          onClick={() => deleteProcess(rIdx)}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                          title="Delete row"
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-600" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          <div className="p-4 rounded-lg border bg-white">
+            <div className="text-sm text-slate-500">KPIs — Avg Performance</div>
+            <div className="text-2xl font-semibold">
+              {(
+                kpis.length
+                  ? kpis.reduce((acc, k) => acc + (k.target_value ? (k.current_value / k.target_value) * 100 : 0), 0) / kpis.length
+                  : 0
+              ).toFixed(1)}%
             </div>
           </div>
-        )}
-
-        {activeTab === "Resources" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">Resources</h2>
-              <Button onClick={addResource} className="gap-2">
-                <Plus className="h-4 w-4" /> Add Resource
-              </Button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="dashboard-table w-full text-sm">
-                <thead>
-                  <tr className="text-left">
-                    {["Resource", "Type", "Quantity", "Cost", "Department", "Notes", ""].map((h) => (
-                      <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {getResources().map((row, rIdx) => (
-                    <tr key={rIdx} className="border-t">
-                      <td className="px-2 py-2 min-w-[220px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[0] ?? ""}
-                          onChange={(e) => updateResourceCell(rIdx, 0, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[150px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[1] ?? ""}
-                          onChange={(e) => updateResourceCell(rIdx, 1, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[2] ?? 0}
-                          onChange={(e) => updateResourceCell(rIdx, 2, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[3] ?? 0}
-                          onChange={(e) => updateResourceCell(rIdx, 3, Number(e.target.value) || 0)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[180px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[4] ?? ""}
-                          onChange={(e) => updateResourceCell(rIdx, 4, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[240px]">
-                        <AutoTextarea value={row[5] ?? ""} onChange={(v) => updateResourceCell(rIdx, 5, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[64px]">
-                        <button
-                          onClick={() => deleteResource(rIdx)}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                          title="Delete row"
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-600" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+          <div className="p-4 rounded-lg border bg-white">
+            <div className="text-sm text-slate-500">Risks — Total</div>
+            <div className="text-2xl font-semibold">{risks.length}</div>
           </div>
-        )}
 
-        {activeTab === "Risks" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">Risks</h2>
-              <Button onClick={addRisk} className="gap-2">
-                <Plus className="h-4 w-4" /> Add Risk
-              </Button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="dashboard-table w-full text-sm">
-                <thead>
-                  <tr className="text-left">
-                    {["id", "risk", "impact", "prob", "mitigation", "owner", "due", "status", ""].map((h) => (
-                      <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {getRisks().map((row, rIdx) => (
-                    <tr key={rIdx} className="border-t">
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[0] ?? ""}
-                          onChange={(e) => updateRiskCell(rIdx, 0, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[260px]">
-                        <AutoTextarea value={row[1] ?? ""} onChange={(v) => updateRiskCell(rIdx, 1, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[100px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[2] ?? ""}
-                          onChange={(e) => updateRiskCell(rIdx, 2, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[100px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[3] ?? ""}
-                          onChange={(e) => updateRiskCell(rIdx, 3, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[260px]">
-                        <AutoTextarea value={row[4] ?? ""} onChange={(v) => updateRiskCell(rIdx, 4, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[160px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[5] ?? ""}
-                          onChange={(e) => updateRiskCell(rIdx, 5, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[150px]">
-                        <input
-                          type="date"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[6] ?? ""}
-                          onChange={(e) => updateRiskCell(rIdx, 6, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[7] ?? ""}
-                          onChange={(e) => updateRiskCell(rIdx, 7, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[64px]">
-                        <button
-                          onClick={() => deleteRisk(rIdx)}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                          title="Delete row"
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-600" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {activeTab === "Meetings" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">Meetings</h2>
-              <div className="flex items-center gap-2">
-                <Button onClick={openNewMeetingModal} className="gap-2">
-                  <Plus className="h-4 w-4" /> Schedule Meeting
-                </Button>
-                <Button variant="outline" onClick={addMeetingRow} className="gap-2">
-                  <Plus className="h-4 w-4" /> Quick Add Row
-                </Button>
+          <div className="lg:col-span-3 p-4 rounded-lg border bg-white">
+            <div className="text-sm font-medium mb-2">Budget vs Actual (Summary)</div>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
+              <div className="p-3 rounded border">
+                <div className="text-slate-500">CapEx Total</div>
+                <div className="text-lg font-semibold">${capexTotal.toLocaleString()}</div>
+              </div>
+              <div className="p-3 rounded border">
+                <div className="text-slate-500">OpEx Total</div>
+                <div className="text-lg font-semibold">${opexTotal.toLocaleString()}</div>
+              </div>
+              <div className="p-3 rounded border">
+                <div className="text-slate-500">Revenue (Est.)</div>
+                <div className="text-lg font-semibold">${revenue.toLocaleString()}</div>
+              </div>
+              <div className="p-3 rounded border">
+                <div className="text-slate-500">Gross Profit (Est.)</div>
+                <div className="text-lg font-semibold">${grossProfit.toLocaleString()}</div>
               </div>
             </div>
-            <div className="overflow-x-auto">
-              <table className="dashboard-table w-full text-sm">
-                <thead>
-                  <tr className="text-left">
-                    {[
-                      "id",
-                      "title",
-                      "date",
-                      "time",
-                      "duration",
-                      "attendees",
-                      "location",
-                      "status",
-                      "agenda",
-                      "objectives",
-                      "notes",
-                      "",
-                    ].map((h) => (
-                      <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {getMeetings().map((row, rIdx) => (
-                    <tr key={rIdx} className="border-t align-top">
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[0] ?? ""}
-                          onChange={(e) => updateMeetingCell(rIdx, 0, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[200px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[1] ?? ""}
-                          onChange={(e) => updateMeetingCell(rIdx, 1, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          type="date"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[2] ?? ""}
-                          onChange={(e) => updateMeetingCell(rIdx, 2, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[3] ?? ""}
-                          onChange={(e) => updateMeetingCell(rIdx, 3, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[4] ?? ""}
-                          onChange={(e) => updateMeetingCell(rIdx, 4, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[220px]">
-                        <AutoTextarea value={row[5] ?? row[10] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 5, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[200px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[6] ?? ""}
-                          onChange={(e) => updateMeetingCell(rIdx, 6, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[140px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[7] ?? ""}
-                          onChange={(e) => updateMeetingCell(rIdx, 7, e.target.value)}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[260px]">
-                        <AutoTextarea value={row[8] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 8, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[260px]">
-                        <AutoTextarea value={row[9] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 9, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[260px]">
-                        <AutoTextarea value={row[10] ?? ""} onChange={(v) => updateMeetingCell(rIdx, 10, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[220px]">
-                        <div className="flex flex-wrap gap-2">
-                          <Button variant="outline" size="sm" onClick={() => openEditMeetingModal(rIdx)} className="gap-1">
-                            Edit
-                          </Button>
-                          <Button variant="outline" size="sm" onClick={() => exportMeetingSummary(rIdx)} className="gap-1">
-                            <FileText className="h-4 w-4" />
-                            Export
-                          </Button>
-                          <button
-                            onClick={() => deleteMeeting(rIdx)}
-                            className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                            title="Delete row"
-                          >
-                            <Trash2 className="h-4 w-4 text-rose-600" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'Projects' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Projects</div>
+            <div className="flex gap-2">
+              <Button onClick={() => addRow('projects')} className="gap-2"><Plus className="h-4 w-4"/>Add Project</Button>
             </div>
+          </div>
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {[
+                    'ID','Name','Type','Priority','Owner','Start','Finish','Dependencies','Deliverables','Goals',
+                    'R','A','C','I','Needs','Barriers','Risks','% Complete','CapEx','OpEx','Link','Critical','Status','Slack (d)'
+                  ].map((h) => (
+                    <th key={h} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
+                  ))}
+                  <th className="px-2 py-2 text-left border-b">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {projects.map((row, ri) => (
+                  <tr key={ri} className="align-top">
+                    {Array.from({ length: 24 }).map((_, ci) => (
+                      <td
+                        key={ci}
+                        className="border-b p-2 align-top break-words whitespace-pre-wrap"
+                        style={{ minWidth: ci === 1 || ci === 8 || ci === 9 || ci === 15 || ci === 16 ? 260 : 140, maxWidth: 360 }}
+                      >
+                        <input
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={String(row?.[ci] ?? '')}
+                          onChange={(e) => updateCell(setProjects, ri, ci, e.target.value)}
+                        />
+                      </td>
+                    ))}
+                    <td className="border-b p-2">
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('projects', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
-            {showMeetingModal && (
-              <div className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4">
-                <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-xl">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-lg font-semibold">{editingMeetingIndex === null ? "Schedule Meeting" : "Edit Meeting"}</h3>
-                    <button
-                      onClick={() => setShowMeetingModal(false)}
-                      className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-slate-50"
-                      title="Close"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
+      {activeTab === 'Processes' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Processes</div>
+            <Button onClick={() => addRow('processes')} className="gap-2"><Plus className="h-4 w-4"/>Add Process</Button>
+          </div>
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {['Process','Time (min)','Batch Size','Yield (%)','Cycle (s)','Equipment','Type','Status','Owner','']
+                    .map((h, i) => (
+                      <th key={i} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {processes.map((row, ri) => (
+                  <tr key={ri} className="align-top">
+                    {Array.from({ length: 9 }).map((_, ci) => (
+                      <td key={ci} className="border-b p-2 whitespace-pre-wrap break-words" style={{ minWidth: ci === 0 ? 240 : 140 }}>
+                        <input
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={String(row?.[ci] ?? '')}
+                          onChange={(e) => updateCell(setProcesses, ri, ci, e.target.value)}
+                        />
+                      </td>
+                    ))}
+                    <td className="border-b p-2">
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('processes', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'Resources' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Resources</div>
+            <Button onClick={() => addRow('resources')} className="gap-2"><Plus className="h-4 w-4"/>Add Resource</Button>
+          </div>
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {['Resource','Type','Qty','Cost','Department','Notes','']
+                    .map((h, i) => (
+                      <th key={i} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {resources.map((row, ri) => (
+                  <tr key={ri} className="align-top">
+                    {Array.from({ length: 6 }).map((_, ci) => (
+                      <td key={ci} className="border-b p-2 whitespace-pre-wrap break-words" style={{ minWidth: ci === 0 ? 220 : 140 }}>
+                        <input
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={String(row?.[ci] ?? '')}
+                          onChange={(e) => updateCell(setResources, ri, ci, e.target.value)}
+                        />
+                      </td>
+                    ))}
+                    <td className="border-b p-2">
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('resources', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'Risks' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Risks</div>
+            <Button onClick={() => addRow('risks')} className="gap-2"><Plus className="h-4 w-4"/>Add Risk</Button>
+          </div>
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {['ID','Risk','Impact','Prob','Mitigation','Owner','Due','Status','']
+                    .map((h, i) => (
+                      <th key={i} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {risks.map((row, ri) => (
+                  <tr key={ri} className="align-top">
+                    {Array.from({ length: 8 }).map((_, ci) => (
+                      <td key={ci} className="border-b p-2 whitespace-pre-wrap break-words" style={{ minWidth: ci === 1 || ci === 4 ? 260 : 140 }}>
+                        <input
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={String(row?.[ci] ?? '')}
+                          onChange={(e) => updateCell(setRisks, ri, ci, e.target.value)}
+                        />
+                      </td>
+                    ))}
+                    <td className="border-b p-2">
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('risks', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'Financials' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Financials</div>
+            <Button onClick={() => addRow('financials')} className="gap-2"><Plus className="h-4 w-4"/>Add Item</Button>
+          </div>
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {['Category','Item','Amount','Type','Notes','']
+                    .map((h, i) => (
+                      <th key={i} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {financials.map((row, ri) => (
+                  <tr key={ri} className="align-top">
+                    {Array.from({ length: 5 }).map((_, ci) => (
+                      <td key={ci} className="border-b p-2 whitespace-pre-wrap break-words" style={{ minWidth: ci === 4 ? 260 : 160 }}>
+                        <input
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={String(row?.[ci] ?? '')}
+                          onChange={(e) => updateCell(setFinancials, ri, ci, e.target.value)}
+                        />
+                      </td>
+                    ))}
+                    <td className="border-b p-2">
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('financials', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="p-3 rounded border bg-white">
+              <div className="text-sm text-slate-500">CapEx Total</div>
+              <div className="text-lg font-semibold">${capexTotal.toLocaleString()}</div>
+            </div>
+            <div className="p-3 rounded border bg-white">
+              <div className="text-sm text-slate-500">OpEx Total</div>
+              <div className="text-lg font-semibold">${opexTotal.toLocaleString()}</div>
+            </div>
+            <div className="p-3 rounded border bg-white">
+              <div className="text-sm text-slate-500">Cost / Unit</div>
+              <div className="text-lg font-semibold">${cpu.toFixed(2)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'Meetings' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Project Meetings</div>
+            <div className="flex gap-2">
+              <Button onClick={() => addRow('meetings')} className="gap-2"><Calendar className="h-4 w-4"/>Schedule Meeting</Button>
+            </div>
+          </div>
+
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {['ID','Title','Date','Time','Duration','Attendees','Location','Status','Agenda','Objectives','Notes','']
+                    .map((h, i) => (
+                      <th key={i} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {meetings.map((row, ri) => (
+                  <tr key={ri} className="align-top">
+                    {Array.from({ length: 11 }).map((_, ci) => (
+                      <td key={ci} className="border-b p-2 whitespace-pre-wrap break-words" style={{ minWidth: ci >= 8 ? 260 : 160 }}>
+                        <input
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={String(row?.[ci] ?? '')}
+                          onChange={(e) => updateCell(setMeetings, ri, ci, e.target.value)}
+                          onDoubleClick={() => openEditMeetingModal(ri)}
+                          title="Double click to open editor"
+                        />
+                      </td>
+                    ))}
+                    <td className="border-b p-2 flex flex-wrap gap-2">
+                      <Button variant="secondary" className="gap-2" onClick={() => openEditMeetingModal(ri)}>
+                        <FileText className="h-4 w-4"/>Edit
+                      </Button>
+                      <Button className="gap-2" onClick={() => exportMeetingSummary(ri)}>
+                        <FileText className="h-4 w-4"/>Summary PDF
+                      </Button>
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('meetings', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Meeting Modal */}
+          {showMeetingModal && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+              <div className="w-full max-w-3xl bg-white rounded-lg shadow-lg">
+                <div className="p-4 border-b flex items-center justify-between">
+                  <div className="font-medium">{editingMeetingIndex === null ? 'Schedule Meeting' : 'Edit Meeting'}</div>
+                  <button className="text-slate-500" onClick={() => setShowMeetingModal(false)}>✕</button>
+                </div>
+                <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-slate-500">Title</label>
+                    <input className="w-full border rounded px-2 py-1" value={meetingForm.title} onChange={(e) => setMeetingForm({ ...meetingForm, title: e.target.value })} />
                   </div>
-
-                  <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    <div>
-                      <label className="text-xs text-slate-500">Title</label>
-                      <input
-                        className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.title}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, title: e.target.value }))}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-slate-500">Status</label>
-                      <input
-                        className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.status}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, status: e.target.value }))}
-                      />
-                    </div>
+                  <div className="grid grid-cols-3 gap-2">
                     <div>
                       <label className="text-xs text-slate-500">Date</label>
-                      <input
-                        type="date"
-                        className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.date}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, date: e.target.value }))}
-                      />
+                      <input type="date" className="w-full border rounded px-2 py-1" value={meetingForm.date} onChange={(e) => setMeetingForm({ ...meetingForm, date: e.target.value })} />
                     </div>
                     <div>
                       <label className="text-xs text-slate-500">Time</label>
-                      <input
-                        className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.time}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, time: e.target.value }))}
-                      />
+                      <input className="w-full border rounded px-2 py-1" value={meetingForm.time} onChange={(e) => setMeetingForm({ ...meetingForm, time: e.target.value })} />
                     </div>
                     <div>
                       <label className="text-xs text-slate-500">Duration</label>
-                      <input
-                        className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.duration}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, duration: e.target.value }))}
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-slate-500">Location</label>
-                      <input
-                        className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.location}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, location: e.target.value }))}
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label className="text-xs text-slate-500">Attendees (comma separated)</label>
-                      <input
-                        className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.attendees}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, attendees: e.target.value }))}
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label className="text-xs text-slate-500">Objectives</label>
-                      <textarea
-                        className="mt-1 w-full min-h-[80px] rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.objectives}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, objectives: e.target.value }))}
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label className="text-xs text-slate-500">Agenda</label>
-                      <textarea
-                        className="mt-1 w-full min-h-[120px] rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.agenda}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, agenda: e.target.value }))}
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label className="text-xs text-slate-500">Notes / Minutes</label>
-                      <textarea
-                        className="mt-1 w-full min-h-[120px] rounded-md border px-2 py-1 text-sm"
-                        value={meetingForm.notes}
-                        onChange={(e) => setMeetingForm((f) => ({ ...f, notes: e.target.value }))}
-                      />
+                      <input className="w-full border rounded px-2 py-1" value={meetingForm.duration} onChange={(e) => setMeetingForm({ ...meetingForm, duration: e.target.value })} />
                     </div>
                   </div>
-
-                  <div className="mt-6 flex items-center justify-end gap-2">
-                    <Button variant="outline" onClick={() => setShowMeetingModal(false)}>
-                      Cancel
-                    </Button>
-                    <Button onClick={saveMeetingFromModal} className="gap-2">
-                      <Save className="h-4 w-4" /> Save Meeting
-                    </Button>
+                  <div>
+                    <label className="text-xs text-slate-500">Attendees</label>
+                    <input className="w-full border rounded px-2 py-1" value={meetingForm.attendees} onChange={(e) => setMeetingForm({ ...meetingForm, attendees: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500">Location</label>
+                    <input className="w-full border rounded px-2 py-1" value={meetingForm.location} onChange={(e) => setMeetingForm({ ...meetingForm, location: e.target.value })} />
+                  </div>
+                  <div>
+                    <label className="text-xs text-slate-500">Status</label>
+                    <input className="w-full border rounded px-2 py-1" value={meetingForm.status} onChange={(e) => setMeetingForm({ ...meetingForm, status: e.target.value })} />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="text-xs text-slate-500">Objectives</label>
+                    <textarea className="w-full border rounded px-2 py-1 h-20" value={meetingForm.objectives} onChange={(e) => setMeetingForm({ ...meetingForm, objectives: e.target.value })} />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="text-xs text-slate-500">Agenda</label>
+                    <textarea className="w-full border rounded px-2 py-1 h-28" value={meetingForm.agenda} onChange={(e) => setMeetingForm({ ...meetingForm, agenda: e.target.value })} />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="text-xs text-slate-500">Notes</label>
+                    <textarea className="w-full border rounded px-2 py-1 h-28" value={meetingForm.notes} onChange={(e) => setMeetingForm({ ...meetingForm, notes: e.target.value })} />
                   </div>
                 </div>
+                <div className="p-4 border-t flex items-center justify-end gap-2">
+                  <Button variant="secondary" onClick={() => setShowMeetingModal(false)}>Cancel</Button>
+                  <Button onClick={saveMeetingFromModal} className="gap-2"><Calendar className="h-4 w-4"/>Save Meeting</Button>
+                </div>
               </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === "KPIs" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">KPIs</h2>
-              <Button onClick={addKpi} className="gap-2">
-                <Plus className="h-4 w-4" /> Add KPI
-              </Button>
             </div>
-            <div className="overflow-x-auto">
-              <table className="dashboard-table w-full text-sm">
-                <thead>
-                  <tr className="text-left">
-                    {["Name", "Current", "Target", "Unit", "Owner", ""].map((h) => (
-                      <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {getKpis().map((k) => (
-                    <tr key={k.id} className="border-t">
-                      <td className="px-2 py-2 min-w-[220px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={k.name}
-                          onChange={(e) => updateKpi(k.id, { name: e.target.value })}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={k.current_value}
-                          onChange={(e) => updateKpi(k.id, { current_value: Number(e.target.value) || 0 })}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[120px]">
-                        <input
-                          type="number"
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={k.target_value}
-                          onChange={(e) => updateKpi(k.id, { target_value: Number(e.target.value) || 0 })}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[100px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={k.unit}
-                          onChange={(e) => updateKpi(k.id, { unit: e.target.value })}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[180px]">
-                        <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={k.owner}
-                          onChange={(e) => updateKpi(k.id, { owner: e.target.value })}
-                        />
-                      </td>
-                      <td className="px-2 py-2 min-w-[64px]">
-                        <button
-                          onClick={() => deleteKpi(k.id)}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                          title="Delete KPI"
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-600" />
-                        </button>
-                      </td>
-                    </tr>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'KPIs' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Key Performance Indicators</div>
+            <Button onClick={() => addRow('kpis')} className="gap-2"><Plus className="h-4 w-4"/>Add KPI</Button>
+          </div>
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {['Name','Current','Target','Unit','Owner','']
+                    .map((h, i) => (
+                      <th key={i} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {activeTab === "Financials" && (
-          <div className="space-y-8">
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-medium">CapEx ({scenario})</h2>
-                <Button onClick={addCapex} className="gap-2">
-                  <Plus className="h-4 w-4" /> Add CapEx
-                </Button>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="dashboard-table w-full text-sm">
-                  <thead>
-                    <tr className="text-left">
-                      {["item", "qty", "unit_cost", "install_cost", "computed_total", ""].map((h) => (
-                        <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {getCapexRows().map((row, rIdx) => {
-                      const total = (Number(row?.[1]) || 0) * (Number(row?.[2]) || 0) + (Number(row?.[3]) || 0);
-                      return (
-                        <tr key={rIdx} className="border-t">
-                          <td className="px-2 py-2 min-w-[260px]">
-                            <input
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[0] ?? ""}
-                              onChange={(e) => updateCapexCell(rIdx, 0, e.target.value)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[120px]">
-                            <input
-                              type="number"
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[1] ?? 0}
-                              onChange={(e) => updateCapexCell(rIdx, 1, Number(e.target.value) || 0)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[140px]">
-                            <input
-                              type="number"
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[2] ?? 0}
-                              onChange={(e) => updateCapexCell(rIdx, 2, Number(e.target.value) || 0)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[140px]">
-                            <input
-                              type="number"
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[3] ?? 0}
-                              onChange={(e) => updateCapexCell(rIdx, 3, Number(e.target.value) || 0)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[160px]">{total.toLocaleString()}</td>
-                          <td className="px-2 py-2 min-w-[64px]">
-                            <button
-                              onClick={() => deleteCapex(rIdx)}
-                              className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                              title="Delete row"
-                            >
-                              <Trash2 className="h-4 w-4 text-rose-600" />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-lg font-medium">OpEx ({scenario})</h2>
-                <Button onClick={addOpex} className="gap-2">
-                  <Plus className="h-4 w-4" /> Add OpEx
-                </Button>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="dashboard-table w-full text-sm">
-                  <thead>
-                    <tr className="text-left">
-                      {["item", "rate", "qty", "unit_cost", "computed_total", ""].map((h) => (
-                        <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {getOpexRows().map((row, rIdx) => {
-                      const total = (Number(row?.[2]) || 0) * (Number(row?.[3]) || 0);
-                      return (
-                        <tr key={rIdx} className="border-t">
-                          <td className="px-2 py-2 min-w-[260px]">
-                            <input
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[0] ?? ""}
-                              onChange={(e) => updateOpexCell(rIdx, 0, e.target.value)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[160px]">
-                            <input
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[1] ?? ""}
-                              onChange={(e) => updateOpexCell(rIdx, 1, e.target.value)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[120px]">
-                            <input
-                              type="number"
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[2] ?? 0}
-                              onChange={(e) => updateOpexCell(rIdx, 2, Number(e.target.value) || 0)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[140px]">
-                            <input
-                              type="number"
-                              className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                              value={row[3] ?? 0}
-                              onChange={(e) => updateOpexCell(rIdx, 3, Number(e.target.value) || 0)}
-                            />
-                          </td>
-                          <td className="px-2 py-2 min-w-[160px]">{total.toLocaleString()}</td>
-                          <td className="px-2 py-2 min-w-[64px]">
-                            <button
-                              onClick={() => deleteOpex(rIdx)}
-                              className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                              title="Delete row"
-                            >
-                              <Trash2 className="h-4 w-4 text-rose-600" />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === "Glossary" && (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-medium">Glossary</h2>
-              <Button onClick={addGlossary} className="gap-2">
-                <Plus className="h-4 w-4" /> Add Term
-              </Button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="dashboard-table w-full text-sm">
-                <thead>
-                  <tr className="text-left">
-                    {["Term", "Definition", ""].map((h) => (
-                      <th key={h} className="whitespace-nowrap px-2 py-2 text-slate-600">
-                        {h}
-                      </th>
-                    ))}
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {kpis.map((k, ri) => (
+                  <tr key={k.id} className="align-top">
+                    <td className="border-b p-2" style={{ minWidth: 220 }}>
+                      <input className="w-full border rounded px-2 py-1 text-sm" value={k.name} onChange={(e) => updateKpiCell(ri, 'name', e.target.value)} />
+                    </td>
+                    <td className="border-b p-2" style={{ minWidth: 120 }}>
+                      <input className="w-full border rounded px-2 py-1 text-sm" value={k.current_value} onChange={(e) => updateKpiCell(ri, 'current_value', e.target.value)} />
+                    </td>
+                    <td className="border-b p-2" style={{ minWidth: 120 }}>
+                      <input className="w-full border rounded px-2 py-1 text-sm" value={k.target_value} onChange={(e) => updateKpiCell(ri, 'target_value', e.target.value)} />
+                    </td>
+                    <td className="border-b p-2" style={{ minWidth: 100 }}>
+                      <input className="w-full border rounded px-2 py-1 text-sm" value={k.unit} onChange={(e) => updateKpiCell(ri, 'unit', e.target.value)} />
+                    </td>
+                    <td className="border-b p-2" style={{ minWidth: 160 }}>
+                      <input className="w-full border rounded px-2 py-1 text-sm" value={k.owner} onChange={(e) => updateKpiCell(ri, 'owner', e.target.value)} />
+                    </td>
+                    <td className="border-b p-2">
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('kpis', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {getGlossary().map((row, rIdx) => (
-                    <tr key={rIdx} className="border-t">
-                      <td className="px-2 py-2 min-w-[200px]">
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'Glossary' && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm text-slate-600">Glossary</div>
+            <Button onClick={() => addRow('glossary')} className="gap-2"><Plus className="h-4 w-4"/>Add Term</Button>
+          </div>
+          <div className="overflow-auto rounded border">
+            <table className="w-full table-fixed">
+              <thead className="bg-slate-50 text-slate-600 text-sm">
+                <tr>
+                  {['Term','Definition','']
+                    .map((h, i) => (
+                      <th key={i} className="px-2 py-2 text-left border-b whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="text-sm">
+                {glossary.map((row, ri) => (
+                  <tr key={ri} className="align-top">
+                    {Array.from({ length: 2 }).map((_, ci) => (
+                      <td key={ci} className="border-b p-2 whitespace-pre-wrap break-words" style={{ minWidth: ci === 0 ? 180 : 360 }}>
                         <input
-                          className="w-full rounded-md border bg-background px-2 py-1 text-sm"
-                          value={row[0] ?? ""}
-                          onChange={(e) => updateGlossaryCell(rIdx, 0, e.target.value)}
+                          className="w-full border rounded px-2 py-1 text-sm"
+                          value={String(row?.[ci] ?? '')}
+                          onChange={(e) => updateCell(setGlossary, ri, ci, e.target.value)}
                         />
                       </td>
-                      <td className="px-2 py-2 min-w-[400px]">
-                        <AutoTextarea value={row[1] ?? ""} onChange={(v) => updateGlossaryCell(rIdx, 1, v)} />
-                      </td>
-                      <td className="px-2 py-2 min-w-[64px]">
-                        <button
-                          onClick={() => deleteGlossary(rIdx)}
-                          className="inline-flex h-9 w-9 items-center justify-center rounded-md border hover:bg-rose-50"
-                          title="Delete row"
-                        >
-                          <Trash2 className="h-4 w-4 text-rose-600" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                    ))}
+                    <td className="border-b p-2">
+                      <Button variant="destructive" className="gap-2" onClick={() => deleteRow('glossary', ri)}>
+                        <Trash2 className="h-4 w-4"/>Delete
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        )}
-
-        {activeTab === "Config" && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-lg font-medium">Scenario Settings</h2>
-              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <div className="rounded-xl border p-3">
-                  <p className="text-xs text-slate-500">Units / year ({scenario})</p>
-                  <input
-                    type="number"
-                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                    value={plan?.scenarios?.[scenario]?.unitsPerYear || 0}
-                    onChange={(e) =>
-                      setPlan((prev: any) => ({
-                        ...prev,
-                        scenarios: {
-                          ...prev.scenarios,
-                          [scenario]: { ...prev.scenarios[scenario], unitsPerYear: Number(e.target.value) || 0 },
-                        },
-                      }))
-                    }
-                  />
-                </div>
-                <div className="rounded-xl border p-3">
-                  <p className="text-xs text-slate-500">Hours / day ({scenario})</p>
-                  <input
-                    type="number"
-                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                    value={plan?.scenarios?.[scenario]?.hoursPerDay || 8}
-                    onChange={(e) =>
-                      setPlan((prev: any) => ({
-                        ...prev,
-                        scenarios: {
-                          ...prev.scenarios,
-                          [scenario]: { ...prev.scenarios[scenario], hoursPerDay: Number(e.target.value) || 0 },
-                        },
-                      }))
-                    }
-                  />
-                </div>
-                <div className="rounded-xl border p-3">
-                  <p className="text-xs text-slate-500">Shifts ({scenario})</p>
-                  <input
-                    type="number"
-                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                    value={plan?.scenarios?.[scenario]?.shifts || 1}
-                    onChange={(e) =>
-                      setPlan((prev: any) => ({
-                        ...prev,
-                        scenarios: {
-                          ...prev.scenarios,
-                          [scenario]: { ...prev.scenarios[scenario], shifts: Number(e.target.value) || 0 },
-                        },
-                      }))
-                    }
-                  />
-                </div>
-                <div className="rounded-xl border p-3">
-                  <p className="text-xs text-slate-500">Buffer (%)</p>
-                  <input
-                    type="number"
-                    className="mt-1 w-full rounded-md border px-2 py-1 text-sm"
-                    value={Math.round((plan?.bufferPct || 0) * 100)}
-                    onChange={(e) => setPlan((prev: any) => ({ ...prev, bufferPct: Math.max(0, Number(e.target.value) || 0) / 100 }))}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div>
-              <h2 className="text-lg font-medium">Raw JSON (read-only snapshot)</h2>
-              <pre className="mt-2 max-h-80 overflow-auto rounded-lg bg-slate-50 p-3 text-xs">
-                {JSON.stringify({ scenario, variant, plan }, null, 2)}
-              </pre>
-            </div>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
-  );
+  )
 }
