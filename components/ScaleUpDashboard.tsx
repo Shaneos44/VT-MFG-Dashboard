@@ -183,11 +183,6 @@ const ScaleUpDashboard: React.FC = () => {
     ["Quality Issues", "H", "M", "Enhanced QC processes", "Quality", "Active"],
   ])
 
-  const [meetingsData, setMeetingsData] = useState<any[][]>([
-    ["Weekly Status", "2025-08-26", "10:00", "60 min", "Project Team", "Conference Room A", "Scheduled"],
-    ["Monthly Review", "2025-09-02", "14:00", "90 min", "Leadership", "Boardroom", "Scheduled"],
-  ])
-
   const [financialData, setFinancialData] = useState<any[][]>([
     ["Revenue", "Product Sales", 2250000, "Income", "Projected annual revenue"],
     ["COGS", "Manufacturing Costs", 1350000, "Expense", "Direct production costs"],
@@ -230,32 +225,31 @@ const ScaleUpDashboard: React.FC = () => {
     "slack_days",
   ]
 
-  // Wider long-text columns + narrow centered R/A/C/I
   const projectsWidths = [
-    140, // id
-    320, // name
-    160, // type
-    140, // moscow
-    170, // owner
-    150, // start
-    150, // finish
-    140, // dependencies
-    440, // deliverables
-    440, // goal
-    80,  // R
-    80,  // A
-    80,  // C
-    80,  // I
-    400, // needs
-    400, // barriers
-    400, // risks
-    160, // budget_capex
-    160, // budget_opex
-    160, // percent_complete
-    200, // process_link
-    120, // critical
-    150, // status
-    130, // slack_days
+    140,
+    320,
+    160,
+    140,
+    170,
+    150,
+    150,
+    140,
+    440,
+    440,
+    80,
+    80,
+    80,
+    80,
+    400,
+    400,
+    400,
+    160,
+    160,
+    160,
+    200,
+    120,
+    150,
+    130,
   ]
 
   const projectsTableMinW = useMemo(() => projectsWidths.reduce((a, b) => a + b, 0) + 60, [projectsWidths])
@@ -273,7 +267,7 @@ const ScaleUpDashboard: React.FC = () => {
   ]
   const resourcesHeaders = ["Resource", "Type", "Quantity", "Cost", "Department", "Notes"]
   const risksHeaders = ["Risk", "Impact", "Probability", "Mitigation", "Owner", "Status"]
-  const meetingsHeaders = ["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status"]
+  const meetingsHeaders = ["Title", "Date", "Time", "Duration", "Attendees", "Location", "Status", "Agenda", "Notes"]
   const financialHeaders = ["Category", "Item", "Amount", "Type", "Notes"]
   const glossaryHeaders = ["Term", "Definition"]
 
@@ -386,6 +380,71 @@ const ScaleUpDashboard: React.FC = () => {
         [scenario]: {
           ...prev.products?.[scenario],
           projects: updated,
+        },
+      },
+    }))
+    setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
+  }
+
+  // Meetings rows (now with Agenda and Notes)
+  const meetingsRows = useMemo(() => {
+    const rows = ensureArray(currentVariantData.meetings).map((m: any, idx: number) => {
+      // Normalize to 9 columns: title, date, time, duration, attendees, location, status, agenda, notes
+      if (!Array.isArray(m)) {
+        return [
+          m?.title || `Meeting ${idx + 1}`,
+          m?.date || new Date().toISOString().slice(0, 10),
+          m?.time || "10:00",
+          m?.duration || "60 min",
+          m?.attendees || "Team",
+          m?.location || "Location",
+          m?.status || "Scheduled",
+          m?.agenda || "",
+          m?.notes || "",
+        ]
+      }
+      const arr = [...m]
+      while (arr.length < 9) arr.push("")
+      return arr.slice(0, 9)
+    })
+    return rows
+  }, [currentVariantData.meetings])
+
+  const handleMeetingCellChange = (rowIndex: number, colIndex: number, value: any) => {
+    const updated = meetingsRows.map((r) => [...r])
+    if (updated[rowIndex]) updated[rowIndex][colIndex] = value
+    setPlan((prev) => ({
+      ...prev,
+      products: {
+        ...prev.products,
+        [scenario]: {
+          ...prev.products?.[scenario],
+          meetings: updated,
+        },
+      },
+    }))
+    setSyncStatus((s) => ({ ...s, pendingChanges: s.pendingChanges + 1, lastSync: new Date() }))
+  }
+
+  const addMeetingRow = () => {
+    const newRow = [
+      "New Project Meeting",
+      new Date().toISOString().slice(0, 10),
+      "10:00",
+      "60 min",
+      "Team Members",
+      "Conference Room A / Zoom",
+      "Scheduled",
+      "1) Objectives  2) Status Roundtable  3) Risks & Mitigations  4) Decisions",
+      "",
+    ]
+    setPlan((prev) => ({
+      ...prev,
+      products: {
+        ...prev.products,
+        [scenario]: {
+          ...prev.products?.[scenario],
+          meetings: [...meetingsRows, newRow],
         },
       },
     }))
@@ -537,7 +596,6 @@ Dashboard Version: v64
     URL.revokeObjectURL(url)
   }
 
-  // PDF generator with extra spacing and strict page breaks
   const generateComprehensiveReportPDF = async () => {
     const PAGE_W = 595
     const PAGE_H = 842
@@ -630,14 +688,16 @@ Dashboard Version: v64
       status: r?.[7] ?? "",
     }))
 
-    const meetings = ensureArray(currentVariantData.meetings).map((m: any[]) => ({
-      title: m?.[0] ?? m?.[1] ?? "",
-      date: m?.[1] ?? m?.[2] ?? "",
+    const meetings = meetingsRows.map((m: any[]) => ({
+      title: m?.[0] ?? "",
+      date: m?.[1] ?? "",
       time: m?.[2] ?? "—",
       duration: m?.[3] ?? "—",
       attendees: m?.[4] ?? "—",
       location: m?.[5] ?? "—",
       status: m?.[6] ?? "—",
+      agenda: m?.[7] ?? "",
+      notes: m?.[8] ?? "",
     }))
 
     const kpiRows = ensureArray(kpis).map((k: KPI) => ({
@@ -678,11 +738,38 @@ Dashboard Version: v64
     )
 
     title("Meetings")
-    bullets(
-      meetings.length
-        ? meetings.map((m) => `• ${m.title} — ${m.date} ${m.time} — ${m.attendees} — ${m.duration} — ${m.status} — ${m.location}`)
-        : ["• No meetings found."],
-    )
+    if (meetings.length === 0) {
+      bullets(["• No meetings found."])
+    } else {
+      const maxW = PAGE_W - 2 * M
+      meetings.forEach((m) => {
+        const headerLine = `• ${m.title} — ${m.date} ${m.time} — ${m.duration} — ${m.attendees} — ${m.status} — ${m.location}`
+        const headLines = doc.splitTextToSize(headerLine, maxW)
+        headLines.forEach((ln) => {
+          ensureSpace(LINE)
+          doc.text(ln, M, y)
+          y += LINE
+        })
+
+        if (m.agenda && m.agenda.trim().length > 0) {
+          const agendaLines = doc.splitTextToSize(`Agenda: ${m.agenda}`, maxW)
+          agendaLines.forEach((ln) => {
+            ensureSpace(LINE)
+            doc.text(ln, M + 14, y)
+            y += LINE
+          })
+        }
+        if (m.notes && m.notes.trim().length > 0) {
+          const notesLines = doc.splitTextToSize(`Notes: ${m.notes}`, maxW)
+          notesLines.forEach((ln) => {
+            ensureSpace(LINE)
+            doc.text(ln, M + 14, y)
+            y += LINE
+          })
+        }
+        y += GAP
+      })
+    }
 
     title("KPIs")
     bullets(
@@ -970,7 +1057,7 @@ Dashboard Version: v64
 
       {activeTab === "meetings" && (
         <div className="overflow-x-auto rounded-xl border">
-          <table className="table-fixed w-full min-w-[1200px] text-sm">
+          <table className="table-fixed w-full min-w-[1500px] text-sm">
             <thead className="sticky top-0 bg-background z-10">
               <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
                 {meetingsHeaders.map((h) => (
@@ -979,37 +1066,34 @@ Dashboard Version: v64
               </tr>
             </thead>
             <tbody className="[&>tr>td]:px-3 [&>tr>td]:py-2 align-top">
-              {meetingsData.map((row, rIdx) => (
+              {meetingsRows.map((row, rIdx) => (
                 <tr key={rIdx} className="border-t">
-                  {row.map((cell: any, cIdx: number) => (
-                    <td key={`${rIdx}-${cIdx}`}>
-                      <input
-                        className="block w-full min-w-[180px] rounded-md border px-2 py-1 text-sm h-9"
-                        value={cell ?? ""}
-                        onChange={(e) =>
-                          setMeetingsData((prev) => {
-                            const copy = prev.map((r) => [...r])
-                            copy[rIdx][cIdx] = e.target.value
-                            return copy
-                          })
-                        }
-                      />
-                    </td>
-                  ))}
+                  {row.map((cell: any, cIdx: number) => {
+                    const isLong = cIdx === 7 || cIdx === 8
+                    return (
+                      <td key={`${rIdx}-${cIdx}`}>
+                        {isLong ? (
+                          <textarea
+                            className="block w-full min-w-[260px] rounded-md border px-2 py-1 text-sm h-[96px] resize-none whitespace-pre-wrap break-words"
+                            value={cell ?? ""}
+                            onChange={(e) => handleMeetingCellChange(rIdx, cIdx, e.target.value)}
+                          />
+                        ) : (
+                          <input
+                            className="block w-full min-w-[160px] rounded-md border px-2 py-1 text-sm h-9"
+                            value={cell ?? ""}
+                            onChange={(e) => handleMeetingCellChange(rIdx, cIdx, e.target.value)}
+                          />
+                        )}
+                      </td>
+                    )
+                  })}
                 </tr>
               ))}
             </tbody>
           </table>
-          <div className="p-3">
-            <Button
-              variant="outline"
-              onClick={() =>
-                setMeetingsData((prev) => [
-                  ...prev,
-                  ["New Meeting", new Date().toISOString().slice(0, 10), "10:00", "60 min", "Team", "Location", "Scheduled"],
-                ])
-              }
-            >
+          <div className="p-3 flex gap-2">
+            <Button variant="outline" onClick={addMeetingRow}>
               Add Meeting
             </Button>
           </div>
