@@ -9,13 +9,8 @@ import { generateWeeklySummary } from "@/lib/utils";
 import { clone, SEED_PLAN } from "@/lib/constants";
 
 /**
- * Notes:
- * - CapEx / OpEx are now derived from the Financials tab (single source of truth).
- *   Financials row shape is: ["Category", "Item", amount, "Type", "Notes", "Scenario? (optional: 50k|200k|Both)"]
- *   If Scenario column is omitted, it's treated as "Both".
- * - Autosave persists everything (plan/scenario/variant and all tables) via /api/configurations.
- * - Meetings modal, weekly report, CEO report, and all tabs remain intact.
- * - Projects tab uses wrapped text and wider columns so content isn't hidden.
+ * This component renders a tabbed dashboard. Only the active tab content is shown.
+ * Autosave persists to /api/configurations. CAPEX/OPEX are derived from Financials tab.
  */
 
 type AnyRow = any[];
@@ -37,6 +32,19 @@ type Variant = "Recess Nanodispensing" | "Dipcoating";
 const MOSCOW = ["Must", "Should", "Could", "Won't"] as const;
 const IMPACT = ["H", "M", "L"] as const;
 const PROB = ["H", "M", "L"] as const;
+
+const TABS = [
+  "Overview",
+  "Projects",
+  "Processes",
+  "Resources",
+  "Risks",
+  "Financials",
+  "KPIs",
+  "Meetings",
+  "Glossary",
+] as const;
+type TabName = (typeof TABS)[number];
 
 function toNumber(x: any): number {
   const n = Number(x);
@@ -74,7 +82,8 @@ function sumOpexFromFinancials(rows: AnyRow[], scenario: "50k" | "200k"): number
 }
 
 export default function ScaleUpDashboard() {
-  // Core page state
+  // Core UI & global controls
+  const [activeTab, setActiveTab] = useState<TabName>("Overview");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -95,7 +104,7 @@ export default function ScaleUpDashboard() {
     return initialPlan;
   });
 
-  // Tables
+  // Tables data
   const [projects, setProjects] = useState<AnyRow[]>([]);
   const [processes, setProcesses] = useState<AnyRow[]>([]);
   const [resources, setResources] = useState<AnyRow[]>([]);
@@ -228,8 +237,7 @@ export default function ScaleUpDashboard() {
     }
   }, [plan, scenario, variant, projects, processes, resources, risks, financialData, meetings, glossary, hiring, kpis]);
 
-  const broadcastDataUpdate = useCallback((section: string) => {
-    // Debounced autosave trigger
+  const broadcastDataUpdate = useCallback(() => {
     if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
     autoSaveTimeoutRef.current = setTimeout(() => {
       saveProjectDataToDatabase();
@@ -274,8 +282,8 @@ export default function ScaleUpDashboard() {
             if (Array.isArray(d.kpis)) setKpis(d.kpis);
           }
         }
-      } catch (e) {
-        console.warn("Load failed, using defaults.", e);
+      } catch {
+        // use defaults
       } finally {
         setLoading(false);
       }
@@ -285,40 +293,8 @@ export default function ScaleUpDashboard() {
 
   // Trigger autosave when key tables change
   useEffect(() => {
-    if (!loading) broadcastDataUpdate("projects");
-  }, [projects, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("processes");
-  }, [processes, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("resources");
-  }, [resources, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("risks");
-  }, [risks, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("financials");
-  }, [financialData, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("meetings");
-  }, [meetings, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("glossary");
-  }, [glossary, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("hiring");
-  }, [hiring, loading, broadcastDataUpdate]);
-
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate("kpis");
-  }, [kpis, loading, broadcastDataUpdate]);
+    if (!loading) broadcastDataUpdate();
+  }, [projects, processes, resources, risks, financialData, meetings, glossary, hiring, kpis, loading, broadcastDataUpdate]);
 
   // ----------------- Projects Tab -----------------
   const projectHeaders = [
@@ -658,15 +634,15 @@ Scenario: ${scenario} | Variant: ${variant}
 • Total Active Projects: ${summary.projectsCompleted + summary.projectsOnTrack + summary.projectsAtRisk}
 
 🎯 KEY MILESTONES ACHIEVED
-${summary.keyMilestones.map((m) => `• ${m}`).join("\n")}
+${summary.keyMilestones.map((m: string) => `• ${m}`).join("\n")}
 
 ⚠️ CRITICAL ISSUES REQUIRING ATTENTION
-${summary.criticalIssues.length > 0 ? summary.criticalIssues.map((i) => `• ${i}`).join("\n") : "• No critical issues identified"}
+${summary.criticalIssues.length > 0 ? summary.criticalIssues.map((i: string) => `• ${i}`).join("\n") : "• No critical issues identified"}
 
 📈 KPI PERFORMANCE SUMMARY
 ${summary.kpiSummary
   .map(
-    (k) =>
+    (k: any) =>
       `• ${k.name}: ${k.current}/${k.target} ${
         k.trend === "up" ? "↗️" : k.trend === "down" ? "↘️" : "→"
       }`,
@@ -674,7 +650,7 @@ ${summary.kpiSummary
   .join("\n")}
 
 🚀 NEXT WEEK PRIORITIES
-${summary.nextWeekPriorities.map((p) => `• ${p}`).join("\n")}
+${summary.nextWeekPriorities.map((p: string) => `• ${p}`).join("\n")}
 
 ═══════════════════════════════════════════════════════════════
 
@@ -688,7 +664,7 @@ ${summary.nextWeekPriorities.map((p) => `• ${p}`).join("\n")}
 
 ═══════════════════════════════════════════════════════════════
 Generated: ${new Date().toLocaleString()}
-Dashboard Version: v64
+Dashboard Version: v65
     `.trim();
 
     const blob = new Blob([reportContent], { type: "text/plain;charset=utf-8" });
@@ -961,50 +937,70 @@ Dashboard Version: v64
         </div>
       </div>
 
-      {/* Overview cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">Target Output</div>
-          <div className="text-xl font-semibold">{(sc.unitsPerYear || 0).toLocaleString()}</div>
-          <div className="text-xs text-slate-400">units/year</div>
-        </div>
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">CapEx / OpEx</div>
-          <div className="text-lg font-medium">
-            ${overview.capex.toLocaleString()} / ${overview.opex.toLocaleString()}
-          </div>
-        </div>
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">CPU (OpEx only)</div>
-          <div className="text-xl font-semibold">${overview.cpu.toFixed(2)}</div>
-        </div>
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">Margin (est.)</div>
-          <div className="text-xl font-semibold">{overview.marginPct.toFixed(1)}%</div>
-        </div>
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">Projects</div>
-          <div className="text-lg font-medium">
-            {overview.totalProjects} total • {overview.onTrack} on track
-          </div>
-        </div>
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">Completed</div>
-          <div className="text-xl font-semibold">{overview.completed}</div>
-        </div>
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">Avg Takt (s)</div>
-          <div className="text-xl font-semibold">{overview.taktSecondsAvg}</div>
-        </div>
-        <div className="rounded-xl border p-4">
-          <div className="text-xs text-slate-500">KPI Avg</div>
-          <div className="text-xl font-semibold">{overview.kpiAvg}%</div>
+      {/* Tab Bar */}
+      <div className="w-full overflow-x-auto">
+        <div className="inline-flex gap-1 border rounded-xl p-1 bg-white">
+          {TABS.map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap ${
+                activeTab === tab ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="space-y-6">
-        {/* Projects */}
+      {/* TAB CONTENTS — only render active tab */}
+      {activeTab === "Overview" && (
+        <>
+          {/* Overview cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">Target Output</div>
+              <div className="text-xl font-semibold">{(sc.unitsPerYear || 0).toLocaleString()}</div>
+              <div className="text-xs text-slate-400">units/year</div>
+            </div>
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">CapEx / OpEx</div>
+              <div className="text-lg font-medium">
+                ${overview.capex.toLocaleString()} / ${overview.opex.toLocaleString()}
+              </div>
+            </div>
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">CPU (OpEx only)</div>
+              <div className="text-xl font-semibold">${overview.cpu.toFixed(2)}</div>
+            </div>
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">Margin (est.)</div>
+              <div className="text-xl font-semibold">{overview.marginPct.toFixed(1)}%</div>
+            </div>
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">Projects</div>
+              <div className="text-lg font-medium">
+                {overview.totalProjects} total • {overview.onTrack} on track
+              </div>
+            </div>
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">Completed</div>
+              <div className="text-xl font-semibold">{overview.completed}</div>
+            </div>
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">Avg Takt (s)</div>
+              <div className="text-xl font-semibold">{overview.taktSecondsAvg}</div>
+            </div>
+            <div className="rounded-xl border p-4">
+              <div className="text-xs text-slate-500">KPI Avg</div>
+              <div className="text-xl font-semibold">{overview.kpiAvg}%</div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {activeTab === "Projects" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold flex items-center gap-2">
@@ -1039,7 +1035,7 @@ Dashboard Version: v64
                   <tr key={row?.[0] || rIdx}>
                     {projectHeaders.map((_, cIdx) => {
                       const isWide =
-                        [1, 8, 9, 14, 15, 16, 20].includes(cIdx); // columns with long text
+                        [1, 8, 9, 14, 15, 16, 20].includes(cIdx); // long text columns
                       const isDate = [5, 6].includes(cIdx);
                       const isSelectMoSCoW = cIdx === 3;
                       const isNumeric = [17, 18, 19, 23].includes(cIdx);
@@ -1109,7 +1105,7 @@ Dashboard Version: v64
                       const commonStyle: React.CSSProperties = {
                         width: "100%",
                         minWidth: isWide ? 280 : 140,
-                        maxWidth: isWide ? 480 : 220,
+                        maxWidth: isWide ? 520 : 240,
                         whiteSpace: "normal",
                         wordBreak: "break-word",
                       };
@@ -1119,7 +1115,7 @@ Dashboard Version: v64
                           {inputTag === "textarea" ? (
                             <textarea
                               className="w-full border rounded px-2 py-1 text-sm"
-                              style={{ ...commonStyle, height: 68 }}
+                              style={{ ...commonStyle, height: 72 }}
                               value={row?.[cIdx] ?? ""}
                               onChange={(e) => setProjectCell(rIdx, cIdx, e.target.value)}
                             />
@@ -1146,8 +1142,9 @@ Dashboard Version: v64
             </table>
           </div>
         </section>
+      )}
 
-        {/* Processes */}
+      {activeTab === "Processes" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Processes</h2>
@@ -1221,8 +1218,9 @@ Dashboard Version: v64
             </table>
           </div>
         </section>
+      )}
 
-        {/* Resources */}
+      {activeTab === "Resources" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Resources</h2>
@@ -1273,8 +1271,9 @@ Dashboard Version: v64
             </table>
           </div>
         </section>
+      )}
 
-        {/* Risks */}
+      {activeTab === "Risks" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Risks</h2>
@@ -1386,8 +1385,9 @@ Dashboard Version: v64
             </table>
           </div>
         </section>
+      )}
 
-        {/* Financials (drives CapEx/OpEx) */}
+      {activeTab === "Financials" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Financials (Source of Truth for CapEx / OpEx)</h2>
@@ -1514,8 +1514,9 @@ Dashboard Version: v64
             </div>
           </div>
         </section>
+      )}
 
-        {/* KPIs */}
+      {activeTab === "KPIs" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">KPIs</h2>
@@ -1590,11 +1591,18 @@ Dashboard Version: v64
             </table>
           </div>
         </section>
+      )}
 
-        {/* Meetings */}
+      {activeTab === "Meetings" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Project Meetings</h2>
+            <div className="flex gap-2">
+              <Button onClick={openNewMeetingModal} className="gap-2">
+                <CalendarPlus className="h-4 w-4" />
+                Schedule Meeting
+              </Button>
+            </div>
           </div>
           <div className="w-full overflow-x-auto">
             <table className="w-full border-collapse">
@@ -1719,8 +1727,9 @@ Dashboard Version: v64
             </table>
           </div>
         </section>
+      )}
 
-        {/* Glossary */}
+      {activeTab === "Glossary" && (
         <section className="space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold">Glossary</h2>
@@ -1790,9 +1799,9 @@ Dashboard Version: v64
             </table>
           </div>
         </section>
-      </div>
+      )}
 
-      {/* Meeting Modal */}
+      {/* Meeting Modal (global) */}
       {showMeetingModal && (
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl p-4 space-y-3">
