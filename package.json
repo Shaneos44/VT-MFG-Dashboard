@@ -61,6 +61,8 @@
     "tailwindcss-animate": "^1.0.7",
     "vaul": "^0.9.6",
     "zod": "^3.24.1",
+    "jspdf": "^2.5.1",
+    "jspdf-autotable": "^3.8.2",
     "jspdf": "^2.5.1"
   },
   "devDependencies": {
