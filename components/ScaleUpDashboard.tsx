@@ -3,18 +3,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 /**
- * IMPORTANT
- * - This component persists EVERYTHING to /api/configurations (same name key) so it survives refresh & multi-user.
- * - jsPDF & autoTable are loaded with dynamic import inside the functions to avoid SSR build errors.
- * - Projects table cells wrap by default (whitespace-normal break-words), and each column gets a sensible min width.
+ * - Persists all data to /api/configurations (name: ScaleUp-Dashboard-Config)
+ * - jsPDF & autoTable are dynamically imported inside generators (no SSR issues)
+ * - Projects cells wrap nicely; Financials drive CapEx/OpEx; autosave with debounce
  */
-
-/* ----------------------------- Types & helpers ---------------------------- */
 
 type AnyRow = (string | number | boolean | null | undefined)[];
 
 type PlanState = {
-  variant: string; // e.g., "Recess N..."
+  variant: string;
   scenario: "50k" | "200k";
   projects: AnyRow[];
   processes: AnyRow[];
@@ -47,7 +44,6 @@ type PlanState = {
 
 const CONFIG_NAME = "ScaleUp-Dashboard-Config";
 
-/** simple debounce */
 function useDebouncedCallback<T extends (...args: any[]) => void>(fn: T, delay = 1200) {
   const t = useRef<ReturnType<typeof setTimeout> | null>(null);
   return useCallback(
@@ -58,8 +54,6 @@ function useDebouncedCallback<T extends (...args: any[]) => void>(fn: T, delay =
     [fn, delay]
   );
 }
-
-/* ----------------------------- Default data ------------------------------ */
 
 const DEFAULT_PLAN: PlanState = {
   variant: "Recess Nanodispensing",
@@ -109,8 +103,6 @@ const DEFAULT_PLAN: PlanState = {
   },
 };
 
-/* ------------------------------ Main component --------------------------- */
-
 export default function ScaleUpDashboard() {
   const [activeTab, setActiveTab] = useState<
     "Overview" | "Projects" | "Manufacturing" | "Resources" | "Risks" | "KPIs" | "Financials" | "Glossary" | "Meetings" | "Config"
@@ -125,7 +117,7 @@ export default function ScaleUpDashboard() {
     ? { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 }
     : { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 });
 
-  /* ------------------------------ Load / Save ------------------------------ */
+  /* Load / Save */
 
   const loadConfig = useCallback(async () => {
     try {
@@ -133,18 +125,15 @@ export default function ScaleUpDashboard() {
       const res = await fetch("/api/configurations", { method: "GET", cache: "no-store" });
       if (!res.ok) throw new Error(`GET /api/configurations failed: ${res.status}`);
       const rows = (await res.json()) as any[];
-      // choose the most recent config with our name (if you keep multiple)
       const row = rows.find((r) => r.name === CONFIG_NAME) ?? rows[0];
       if (row?.data) {
         setPlan({ ...DEFAULT_PLAN, ...row.data });
       } else {
-        // first use for this user → create a default record immediately
         await saveConfig(DEFAULT_PLAN, true);
         setPlan(DEFAULT_PLAN);
       }
     } catch (e) {
       console.error(e);
-      // fallback to default
       setPlan(DEFAULT_PLAN);
     } finally {
       setLoading(false);
@@ -167,9 +156,7 @@ export default function ScaleUpDashboard() {
         });
         if (!res.ok) throw new Error(`POST /api/configurations failed: ${res.status}`);
         setSaving("saved");
-        if (!isInitial) {
-          setTimeout(() => setSaving("idle"), 1200);
-        }
+        if (!isInitial) setTimeout(() => setSaving("idle"), 1200);
       } catch (e) {
         console.error(e);
         setSaving("idle");
@@ -182,29 +169,19 @@ export default function ScaleUpDashboard() {
     loadConfig();
   }, [loadConfig]);
 
-  // Debounced autosave on any plan change
   const debouncedSave = useDebouncedCallback((next: PlanState) => saveConfig(next), 1400);
   useEffect(() => {
     if (!loading) debouncedSave(plan);
   }, [plan, debouncedSave, loading]);
 
-  /* ---------------------------- Derived metrics ---------------------------- */
+  /* Derived metrics */
 
   const { capexTotal, opexTotal } = useMemo(() => {
-    // Finance rows drive CapEx & OpEx (scenario-aware)
     const rows = plan.financials;
-    const matchesScenario = (rowScenario: "50k" | "200k" | "Both") =>
-      rowScenario === "Both" || rowScenario === scenario;
-
-    const capex = rows
-      .filter((r) => r.category === "CapEx" && matchesScenario(r.scenario))
-      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-
-    const opex = rows
-      .filter((r) => r.category === "OpEx" && matchesScenario(r.scenario))
-      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-
-    return { capexTotal: capex, opexTotal: opex };
+    const matches = (s: "50k" | "200k" | "Both") => s === "Both" || s === scenario;
+    const cap = rows.filter(r => r.category === "CapEx" && matches(r.scenario)).reduce((a, r) => a + (Number(r.amount) || 0), 0);
+    const op = rows.filter(r => r.category === "OpEx" && matches(r.scenario)).reduce((a, r) => a + (Number(r.amount) || 0), 0);
+    return { capexTotal: cap, opexTotal: op };
   }, [plan.financials, scenario]);
 
   const cpu = useMemo(() => {
@@ -214,106 +191,79 @@ export default function ScaleUpDashboard() {
 
   const kpiAvg = useMemo(() => {
     if (!plan.kpis.length) return 0;
-    const acc =
-      plan.kpis.reduce((sum, k) => {
-        const tv = Number(k.target_value) || 0;
-        const cv = Number(k.current_value) || 0;
-        return sum + (tv ? (cv / tv) * 100 : 0);
-      }, 0) / plan.kpis.length;
-    return isFinite(acc) ? acc : 0;
+    const v = plan.kpis.reduce((sum, k) => {
+      const tv = Number(k.target_value) || 0;
+      const cv = Number(k.current_value) || 0;
+      return sum + (tv ? (cv / tv) * 100 : 0);
+    }, 0) / plan.kpis.length;
+    return isFinite(v) ? v : 0;
   }, [plan.kpis]);
 
   const marginPct = useMemo(() => {
-    // simple illustrative P&L using revenue rows from financials
     const revenue = plan.financials
-      .filter((r) => r.category === "Revenue" && (r.scenario === "Both" || r.scenario === scenario))
-      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
-    const grossProfit = revenue - (capexTotal + opexTotal);
-    return revenue > 0 ? (grossProfit / revenue) * 100 : 0;
+      .filter(r => r.category === "Revenue" && (r.scenario === "Both" || r.scenario === scenario))
+      .reduce((a, r) => a + (Number(r.amount) || 0), 0);
+    const gp = revenue - (capexTotal + opexTotal);
+    return revenue > 0 ? (gp / revenue) * 100 : 0;
   }, [plan.financials, capexTotal, opexTotal, scenario]);
 
-  /* -------------------------------- UI helpers ----------------------------- */
+  /* State helpers */
 
   const updatePlan = <K extends keyof PlanState>(key: K, value: PlanState[K]) =>
-    setPlan((p) => ({ ...p, [key]: value }));
+    setPlan(p => ({ ...p, [key]: value }));
 
   const addProject = () => {
     const id = `PROJ-${String(plan.projects.length + 1).padStart(3, "0")}`;
     const row: AnyRow = [
-      id, // 0 id
-      "New Project", // 1 name
-      "Plan", // 2 type/phase
-      "Must", // 3 moscow
-      "Project Manager", // 4 owner
-      new Date().toISOString().slice(0, 10), // 5 start
-      new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10), // 6 finish
-      0, // 7 dependencies
-      "", // 8 deliverables
-      "", // 9 goal
-      "", // 10 R
-      "", // 11 A
-      "", // 12 C
-      "", // 13 I
-      "", // 14 needs
-      "", // 15 barriers
-      "", // 16 risks
-      0, // 17 budget capex
-      0, // 18 budget opex
-      0, // 19 progress %
-      "", // 20 process link
-      "No", // 21 critical
-      "GREEN", // 22 status
-      0, // 23 slack days
-      "", // 24 actions
-      "", // 25 notes
+      id,"New Project","Plan","Must","Project Manager",
+      new Date().toISOString().slice(0,10),
+      new Date(Date.now()+1000*60*60*24*30).toISOString().slice(0,10),
+      0,"","",
+      "","","","",
+      "","","",
+      0,0,0,"No","No","GREEN",0,"",""
     ];
     updatePlan("projects", [row, ...plan.projects]);
   };
-
-  const addProcess = () => {
-    const row: AnyRow = ["New Process", 10, 1, 12, "Fixture", "Planned", "Ops"]; // Process, Time, Batch, Cycle, Equipment, Status, Owner
-    updatePlan("processes", [row, ...plan.processes]);
+  const removeProject = (idx: number) => {
+    const next = [...plan.projects];
+    next.splice(idx, 1);
+    updatePlan("projects", next);
   };
 
-  const addResource = () => {
-    const row: AnyRow = ["New Resource", "Personnel", 1, 0, "Department", ""]; // resource, type, qty, cost, dept, notes
-    updatePlan("resources", [row, ...plan.resources]);
+  const addProcess = () => updatePlan("processes", [["New Process",10,1,12,"Fixture","Planned","Ops"], ...plan.processes]);
+  const removeProcess = (idx: number) => {
+    const next=[...plan.processes]; next.splice(idx,1); updatePlan("processes", next);
   };
 
-  const addRisk = () => {
-    const row: AnyRow = [
-      `RISK-${plan.risks.length + 1}`,
-      "New risk",
-      "High",
-      "Medium",
-      "Mitigation plan",
-      "Owner",
-      "Open",
-      "",
-    ];
-    updatePlan("risks", [row, ...plan.risks]);
+  const addResource = () => updatePlan("resources", [["New Resource","Personnel",1,0,"Department",""], ...plan.resources]);
+  const removeResource = (idx: number) => {
+    const next=[...plan.resources]; next.splice(idx,1); updatePlan("resources", next);
+  };
+
+  const addRisk = () => updatePlan("risks", [[`RISK-${plan.risks.length+1}`,"New risk","High","Medium","Mitigation plan","Owner","Open",""], ...plan.risks]);
+  const removeRisk = (idx: number) => {
+    const next=[...plan.risks]; next.splice(idx,1); updatePlan("risks", next);
   };
 
   const addFinancialRow = () => {
-    const row: PlanState["financials"][number] = {
-      id: `FIN-${Date.now()}`,
-      category: "OpEx",
-      item: "New cost item",
-      amount: 0,
-      type: "Expense",
-      notes: "",
-      scenario: "Both",
-    };
+    const row: PlanState["financials"][number] = { id:`FIN-${Date.now()}`, category:"OpEx", item:"New cost item", amount:0, type:"Expense", notes:"", scenario:"Both" };
     updatePlan("financials", [row, ...plan.financials]);
   };
-
   const removeFinancialRow = (idx: number) => {
-    const next = [...plan.financials];
-    next.splice(idx, 1);
-    updatePlan("financials", next);
+    const next=[...plan.financials]; next.splice(idx,1); updatePlan("financials", next);
   };
 
-  /* --------------------------- Meetings (modal) ---------------------------- */
+  const addGlossaryRow = () => updatePlan("glossary", [["Term","Definition"], ...plan.glossary]);
+  const removeGlossaryRow = (idx: number) => {
+    const next=[...plan.glossary]; next.splice(idx,1); updatePlan("glossary", next);
+  };
+
+  const removeKpi = (idx: number) => {
+    const next=[...plan.kpis]; next.splice(idx,1); updatePlan("kpis", next);
+  };
+
+  /* Meetings */
 
   const [showMeetingModal, setShowMeetingModal] = useState(false);
   const [editingMeetingIndex, setEditingMeetingIndex] = useState<number | null>(null);
@@ -369,36 +319,23 @@ export default function ScaleUpDashboard() {
   };
 
   const saveMeetingFromModal = () => {
-    const rows = [...plan.meetings];
+    const rows=[...plan.meetings];
     const newRow: AnyRow = [
-      meetingForm.id,
-      meetingForm.title,
-      meetingForm.date,
-      meetingForm.time,
-      meetingForm.duration,
-      meetingForm.attendees,
-      meetingForm.location,
-      meetingForm.status,
-      meetingForm.agenda,
-      meetingForm.objectives,
-      meetingForm.notes,
-      meetingForm.attendees,
+      meetingForm.id, meetingForm.title, meetingForm.date, meetingForm.time, meetingForm.duration,
+      meetingForm.attendees, meetingForm.location, meetingForm.status, meetingForm.agenda, meetingForm.objectives, meetingForm.notes, meetingForm.attendees
     ];
-    if (editingMeetingIndex === null) {
-      rows.unshift(newRow);
-    } else {
-      rows[editingMeetingIndex] = newRow;
-    }
+    if (editingMeetingIndex === null) rows.unshift(newRow); else rows[editingMeetingIndex] = newRow;
     updatePlan("meetings", rows);
     setShowMeetingModal(false);
     setEditingMeetingIndex(null);
   };
 
+  const removeMeeting = (idx: number) => {
+    const next=[...plan.meetings]; next.splice(idx,1); updatePlan("meetings", next);
+  };
+
   const exportMeetingSummary = async (rowIndex: number) => {
-    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
-      import("jspdf"),
-      import("jspdf-autotable"),
-    ]);
+    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);
     const row = plan.meetings[rowIndex] || [];
     const title = String(row[1] || "Meeting");
     const date = String(row[2] || "");
@@ -431,11 +368,7 @@ export default function ScaleUpDashboard() {
     (autoTable as any)(doc, {
       startY: y,
       head: [["Section", "Details"]],
-      body: [
-        ["Objectives", objectives],
-        ["Agenda", agenda],
-        ["Notes / Minutes", notes],
-      ],
+      body: [["Objectives", objectives], ["Agenda", agenda], ["Notes / Minutes", notes]],
       styles: { fontSize: 10, cellPadding: 6, valign: "top" },
       headStyles: { fillColor: [15, 23, 42] },
       columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 380 } },
@@ -446,7 +379,7 @@ export default function ScaleUpDashboard() {
     doc.save(`Meeting_${title.replace(/\s+/g, "_")}_${date}.pdf`);
   };
 
-  /* ------------------------------- Reporting ------------------------------- */
+  /* Reports */
 
   const generateWeeklyText = () => {
     const lines: string[] = [];
@@ -472,18 +405,15 @@ export default function ScaleUpDashboard() {
   };
 
   const generateCEOReportPDF = async () => {
-    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
-      import("jspdf"),
-      import("jspdf-autotable"),
-    ]);
+    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([import("jspdf"), import("jspdf-autotable")]);
 
     const doc = new jsPDF({ unit: "pt", format: "a4" });
     const left = 40;
     let y = 56;
 
     const revenue = plan.financials
-      .filter((r) => r.category === "Revenue" && (r.scenario === "Both" || r.scenario === scenario))
-      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+      .filter(r => r.category === "Revenue" && (r.scenario === "Both" || r.scenario === scenario))
+      .reduce((a, r) => a + (Number(r.amount) || 0), 0);
 
     const grossProfit = revenue - (capexTotal + opexTotal);
     const margin = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
@@ -527,44 +457,13 @@ export default function ScaleUpDashboard() {
       theme: "grid",
     });
 
-    let ay = (doc as any).lastAutoTable.finalY + 24;
-
-    (autoTable as any)(doc, {
-      startY: ay,
-      head: [["KPI", "Current", "Target", "Δ Var (%)", "Owner"]],
-      body: plan.kpis.map((k) => [
-        k.name,
-        `${k.current_value} ${k.unit}`,
-        `${k.target_value} ${k.unit}`,
-        k.target_value ? (((k.current_value - k.target_value) / k.target_value) * 100).toFixed(1) : "0.0",
-        k.owner,
-      ]),
-      styles: { fontSize: 9, cellPadding: 5 },
-      headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 100 }, 2: { cellWidth: 100 }, 3: { cellWidth: 80 }, 4: { cellWidth: 120 } },
-      margin: { left },
-      theme: "striped",
-      didDrawPage: (data: any) => {
-        doc.setFontSize(12);
-        doc.text("KPI Dashboard", left, data.settings.startY - 8);
-      },
-    });
-
-    const fileName = `CEO_Summary_${plan.variant.replace(/\s+/g, "_")}_${scenario}_${new Date()
-      .toISOString()
-      .slice(0, 10)}.pdf`;
+    const fileName = `CEO_Summary_${plan.variant.replace(/\s+/g, "_")}_${scenario}_${new Date().toISOString().slice(0, 10)}.pdf`;
     doc.save(fileName);
   };
 
-  /* --------------------------------- Render -------------------------------- */
+  /* Render */
 
-  if (loading) {
-    return (
-      <div className="p-6 text-slate-600">
-        Loading…
-      </div>
-    );
-  }
+  if (loading) return <div className="p-6 text-slate-600">Loading…</div>;
 
   return (
     <div className="p-4 md:p-6">
@@ -573,53 +472,25 @@ export default function ScaleUpDashboard() {
         <h1 className="text-2xl font-semibold">Scale-Up Dashboard</h1>
 
         <div className="ml-auto flex flex-wrap gap-2">
-          <select
-            className="px-3 py-2 rounded border text-sm"
-            value={plan.variant}
-            onChange={(e) => updatePlan("variant", e.target.value)}
-          >
+          <select className="px-3 py-2 rounded border text-sm" value={plan.variant} onChange={(e) => updatePlan("variant", e.target.value)}>
             <option>Recess Nanodispensing</option>
             <option>Hot-Fill Syringe</option>
             <option>Catheter Assembly</option>
           </select>
 
-          <select
-            className="px-3 py-2 rounded border text-sm"
-            value={plan.scenario}
-            onChange={(e) => updatePlan("scenario", e.target.value as PlanState["scenario"])}
-          >
+          <select className="px-3 py-2 rounded border text-sm" value={plan.scenario}
+            onChange={(e) => updatePlan("scenario", e.target.value as PlanState["scenario"])}>
             <option value="50k">50k</option>
             <option value="200k">200k</option>
           </select>
 
-          <button
-            onClick={() => saveConfig(plan)}
-            className="inline-flex items-center gap-2 rounded bg-slate-900 text-white px-3 py-2 text-sm"
-            title="Force save now"
-          >
-            <span className="material-symbols-outlined text-base">save</span>
+          <button onClick={() => saveConfig(plan)} className="inline-flex items-center gap-2 rounded bg-slate-900 text-white px-3 py-2 text-sm">
             {saving === "saving" ? "Saving…" : saving === "saved" ? "Saved" : "Save Now"}
           </button>
 
-          <button
-            onClick={generateWeeklyText}
-            className="rounded border px-3 py-2 text-sm"
-            title="Download a TXT weekly summary"
-          >
-            Weekly Report (TXT)
-          </button>
-
-          <button
-            onClick={generateCEOReportPDF}
-            className="rounded border px-3 py-2 text-sm"
-            title="Download a CEO-ready PDF snapshot"
-          >
-            CEO Summary (PDF)
-          </button>
-
-          <button onClick={openNewMeetingModal} className="rounded border px-3 py-2 text-sm">
-            New Meeting
-          </button>
+          <button onClick={generateWeeklyText} className="rounded border px-3 py-2 text-sm">Weekly Report (TXT)</button>
+          <button onClick={generateCEOReportPDF} className="rounded border px-3 py-2 text-sm">CEO Summary (PDF)</button>
+          <button onClick={openNewMeetingModal} className="rounded border px-3 py-2 text-sm">New Meeting</button>
         </div>
       </div>
 
@@ -629,57 +500,32 @@ export default function ScaleUpDashboard() {
         <StatCard title="CapEx / OpEx" value={`$${capexTotal.toLocaleString()} / $${opexTotal.toLocaleString()}`} />
         <StatCard title="CPU (OpEx only)" value={`$${cpu.toFixed(2)}`} />
         <StatCard title="Margin (est.)" value={`${marginPct.toFixed(1)}%`} />
-        <StatCard
-          title="Projects"
-          value={`${plan.projects.length} total • ${
-            plan.projects.filter((p) => String(p?.[22] || "").toUpperCase() === "GREEN").length
-          } on track`}
-        />
+        <StatCard title="Projects" value={`${plan.projects.length} total • ${plan.projects.filter((p) => String(p?.[22] || "").toUpperCase() === "GREEN").length} on track`} />
         <StatCard title="KPI Avg" value={`${kpiAvg.toFixed(1)}%`} />
       </div>
 
       {/* Tabs */}
       <div className="flex flex-wrap gap-2 border-b mb-4">
         {(
-          [
-            "Overview",
-            "Projects",
-            "Manufacturing",
-            "Resources",
-            "Risks",
-            "KPIs",
-            "Financials",
-            "Glossary",
-            "Meetings",
-            "Config",
-          ] as typeof activeTab[]
+          ["Overview","Projects","Manufacturing","Resources","Risks","KPIs","Financials","Glossary","Meetings","Config"] as typeof activeTab[]
         ).map((t) => (
-          <button
-            key={t}
-            onClick={() => setActiveTab(t)}
-            className={`px-3 py-2 text-sm rounded-t ${
-              activeTab === t ? "bg-slate-900 text-white" : "bg-slate-100 hover:bg-slate-200"
-            }`}
-          >
-            {t}
-          </button>
+          <button key={t} onClick={() => setActiveTab(t)} className={`px-3 py-2 text-sm rounded-t ${
+            activeTab === t ? "bg-slate-900 text-white" : "bg-slate-100 hover:bg-slate-200"}`}>{t}</button>
         ))}
       </div>
 
-      {/* Panels */}
+      {/* Overview */}
       {activeTab === "Overview" && (
         <div className="grid xl:grid-cols-2 gap-4">
-          {/* Simple high-level charts substitute with totals */}
           <div className="rounded border p-4">
             <h3 className="font-medium mb-3">Performance Snapshot</h3>
             <ul className="space-y-2 text-sm">
               <li>Average KPI Performance: <b>{kpiAvg.toFixed(1)}%</b></li>
               <li>CPU (OpEx only): <b>${cpu.toFixed(2)}</b></li>
-              <li>Projects on track: <b>{plan.projects.filter((p) => String(p?.[22] || "").toUpperCase() === "GREEN").length}</b></li>
+              <li>Projects on track: <b>{plan.projects.filter(p => String(p?.[22] || "").toUpperCase() === "GREEN").length}</b></li>
               <li>Risks open: <b>{plan.risks.length}</b></li>
             </ul>
           </div>
-
           <div className="rounded border p-4">
             <h3 className="font-medium mb-3">Financial Snapshot</h3>
             <ul className="space-y-2 text-sm">
@@ -691,6 +537,7 @@ export default function ScaleUpDashboard() {
         </div>
       )}
 
+      {/* Projects */}
       {activeTab === "Projects" && (
         <section className="mt-2">
           <div className="flex justify-between items-center mb-2">
@@ -699,12 +546,12 @@ export default function ScaleUpDashboard() {
           </div>
 
           <div className="overflow-x-auto rounded border">
-            <table className="min-w-[1200px] w-full text-sm">
+            <table className="min-w-[1280px] w-full text-sm">
               <thead className="bg-slate-50 text-xs">
                 <tr className="[&>th]:px-2 [&>th]:py-2 [&>th]:text-left">
                   {[
                     "ID","Name","Type/Phase","MoSCoW","Owner","Start","Finish","Deps","Deliverables","Goal",
-                    "R","A","C","I","Needs","Barriers","Risks","Budget CapEx","Budget OpEx","Progress %","Process Link","Critical","Status","Slack Days","Actions","Notes"
+                    "R","A","C","I","Needs","Barriers","Risks","Budget CapEx","Budget OpEx","Progress %","Process Link","Critical","Status","Slack Days","Actions","Notes","Delete"
                   ].map((h) => (
                     <th key={h} className="whitespace-nowrap">{h}</th>
                   ))}
@@ -736,6 +583,9 @@ export default function ScaleUpDashboard() {
                         </td>
                       );
                     })}
+                    <td className="align-top">
+                      <button onClick={() => removeProject(idx)} className="text-red-600 border rounded px-2 py-1">Delete</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -744,6 +594,7 @@ export default function ScaleUpDashboard() {
         </section>
       )}
 
+      {/* Processes */}
       {activeTab === "Manufacturing" && (
         <section className="mt-2">
           <div className="flex justify-between items-center mb-2">
@@ -754,10 +605,13 @@ export default function ScaleUpDashboard() {
             headers={["Process","Time (min)","Batch Size","Cycle (s)","Equipment","Status","Owner"]}
             rows={plan.processes}
             onChange={(rows) => updatePlan("processes", rows)}
+            deletable
+            onDelete={removeProcess}
           />
         </section>
       )}
 
+      {/* Resources */}
       {activeTab === "Resources" && (
         <section className="mt-2">
           <div className="flex justify-between items-center mb-2">
@@ -768,10 +622,13 @@ export default function ScaleUpDashboard() {
             headers={["Resource","Type","Quantity","Cost","Department","Notes"]}
             rows={plan.resources}
             onChange={(rows) => updatePlan("resources", rows)}
+            deletable
+            onDelete={removeResource}
           />
         </section>
       )}
 
+      {/* Risks */}
       {activeTab === "Risks" && (
         <section className="mt-2">
           <div className="flex justify-between items-center mb-2">
@@ -782,10 +639,13 @@ export default function ScaleUpDashboard() {
             headers={["ID","Risk","Impact","Prob","Mitigation","Owner","Status","Notes"]}
             rows={plan.risks}
             onChange={(rows) => updatePlan("risks", rows)}
+            deletable
+            onDelete={removeRisk}
           />
         </section>
       )}
 
+      {/* KPIs */}
       {activeTab === "KPIs" && (
         <section className="mt-2">
           <h3 className="font-semibold mb-2">KPIs</h3>
@@ -793,7 +653,7 @@ export default function ScaleUpDashboard() {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-xs">
                 <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
-                  <th>ID</th><th>Name</th><th>Unit</th><th>Owner</th><th>Target</th><th>Current</th>
+                  <th>ID</th><th>Name</th><th>Unit</th><th>Owner</th><th>Target</th><th>Current</th><th>Delete</th>
                 </tr>
               </thead>
               <tbody>
@@ -815,6 +675,9 @@ export default function ScaleUpDashboard() {
                     <td><input type="number" className="w-full border rounded px-2 py-1" value={k.current_value} onChange={(e)=> {
                       const next=[...plan.kpis]; next[i]={...next[i], current_value:Number(e.target.value)}; updatePlan("kpis", next);
                     }}/></td>
+                    <td>
+                      <button onClick={() => removeKpi(i)} className="text-red-600 border rounded px-2 py-1">Delete</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -823,6 +686,7 @@ export default function ScaleUpDashboard() {
         </section>
       )}
 
+      {/* Financials */}
       {activeTab === "Financials" && (
         <section className="mt-2">
           <div className="flex justify-between items-center mb-2">
@@ -834,104 +698,50 @@ export default function ScaleUpDashboard() {
             <table className="w-full min-w-[1000px] text-sm">
               <thead className="bg-slate-50 text-xs">
                 <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
-                  <th>Category</th>
-                  <th>Item</th>
-                  <th>Amount</th>
-                  <th>Type</th>
-                  <th>Notes</th>
-                  <th>Scenario</th>
-                  <th>Actions</th>
+                  <th>Category</th><th>Item</th><th>Amount</th><th>Type</th><th>Notes</th><th>Scenario</th><th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {plan.financials.map((r, i) => (
                   <tr key={r.id} className="border-t [&>td]:px-3 [&>td]:py-2 align-top">
                     <td>
-                      <select
-                        className="border rounded px-2 py-1"
-                        value={r.category}
-                        onChange={(e) => {
-                          const next = [...plan.financials];
-                          next[i] = { ...next[i], category: e.target.value as any };
-                          updatePlan("financials", next);
-                        }}
-                      >
+                      <select className="border rounded px-2 py-1" value={r.category}
+                        onChange={(e) => { const next=[...plan.financials]; next[i]={...next[i], category:e.target.value as any}; updatePlan("financials", next); }}>
                         <option value="Revenue">Revenue</option>
                         <option value="CapEx">CapEx</option>
                         <option value="OpEx">OpEx</option>
                       </select>
                     </td>
                     <td>
-                      <textarea
-                        className="w-full border rounded px-2 py-1 min-w-[240px] h-[36px]"
-                        value={r.item}
-                        onChange={(e) => {
-                          const next = [...plan.financials];
-                          next[i] = { ...next[i], item: e.target.value };
-                          updatePlan("financials", next);
-                        }}
-                      />
+                      <textarea className="w-full border rounded px-2 py-1 min-w-[240px] h-[36px]" value={r.item}
+                        onChange={(e) => { const next=[...plan.financials]; next[i]={...next[i], item:e.target.value}; updatePlan("financials", next); }}/>
                     </td>
                     <td>
-                      <input
-                        type="number"
-                        className="w-[140px] border rounded px-2 py-1"
-                        value={r.amount}
-                        onChange={(e) => {
-                          const next = [...plan.financials];
-                          next[i] = { ...next[i], amount: Number(e.target.value) };
-                          updatePlan("financials", next);
-                        }}
-                      />
+                      <input type="number" className="w-[140px] border rounded px-2 py-1" value={r.amount}
+                        onChange={(e) => { const next=[...plan.financials]; next[i]={...next[i], amount:Number(e.target.value)}; updatePlan("financials", next); }}/>
                     </td>
                     <td>
-                      <select
-                        className="border rounded px-2 py-1"
-                        value={r.type}
-                        onChange={(e) => {
-                          const next = [...plan.financials];
-                          next[i] = { ...next[i], type: e.target.value as any };
-                          updatePlan("financials", next);
-                        }}
-                      >
+                      <select className="border rounded px-2 py-1" value={r.type}
+                        onChange={(e) => { const next=[...plan.financials]; next[i]={...next[i], type:e.target.value as any}; updatePlan("financials", next); }}>
                         <option value="Expense">Expense</option>
                         <option value="Income">Income</option>
                         <option value="Both">Both</option>
                       </select>
                     </td>
                     <td>
-                      <textarea
-                        className="w-full border rounded px-2 py-1 min-w-[260px] h-[36px]"
-                        value={r.notes || ""}
-                        onChange={(e) => {
-                          const next = [...plan.financials];
-                          next[i] = { ...next[i], notes: e.target.value };
-                          updatePlan("financials", next);
-                        }}
-                      />
+                      <textarea className="w-full border rounded px-2 py-1 min-w-[260px] h-[36px]" value={r.notes || ""}
+                        onChange={(e) => { const next=[...plan.financials]; next[i]={...next[i], notes:e.target.value}; updatePlan("financials", next); }}/>
                     </td>
                     <td>
-                      <select
-                        className="border rounded px-2 py-1"
-                        value={r.scenario}
-                        onChange={(e) => {
-                          const next = [...plan.financials];
-                          next[i] = { ...next[i], scenario: e.target.value as any };
-                          updatePlan("financials", next);
-                        }}
-                      >
+                      <select className="border rounded px-2 py-1" value={r.scenario}
+                        onChange={(e) => { const next=[...plan.financials]; next[i]={...next[i], scenario:e.target.value as any}; updatePlan("financials", next); }}>
                         <option value="Both">Both</option>
                         <option value="50k">50k</option>
                         <option value="200k">200k</option>
                       </select>
                     </td>
                     <td>
-                      <button
-                        onClick={() => removeFinancialRow(i)}
-                        className="text-red-600 border rounded px-2 py-1"
-                      >
-                        Delete
-                      </button>
+                      <button onClick={() => removeFinancialRow(i)} className="text-red-600 border rounded px-2 py-1">Delete</button>
                     </td>
                   </tr>
                 ))}
@@ -941,17 +751,24 @@ export default function ScaleUpDashboard() {
         </section>
       )}
 
+      {/* Glossary */}
       {activeTab === "Glossary" && (
         <section className="mt-2">
-          <h3 className="font-semibold mb-2">Glossary</h3>
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="font-semibold">Glossary</h3>
+            <button onClick={addGlossaryRow} className="rounded bg-slate-900 text-white px-3 py-2 text-sm">+ Add Term</button>
+          </div>
           <SimpleGrid
             headers={["Term","Definition"]}
             rows={plan.glossary}
             onChange={(rows) => updatePlan("glossary", rows)}
+            deletable
+            onDelete={removeGlossaryRow}
           />
         </section>
       )}
 
+      {/* Meetings */}
       {activeTab === "Meetings" && (
         <section className="mt-2">
           <div className="flex justify-between items-center mb-2">
@@ -980,6 +797,7 @@ export default function ScaleUpDashboard() {
                     <td className="space-x-2">
                       <button className="border rounded px-2 py-1" onClick={() => openEditMeetingModal(i)}>Edit</button>
                       <button className="border rounded px-2 py-1" onClick={() => exportMeetingSummary(i)}>Export PDF</button>
+                      <button className="border rounded px-2 py-1 text-red-600" onClick={() => removeMeeting(i)}>Delete</button>
                     </td>
                   </tr>
                 ))}
@@ -1012,27 +830,18 @@ export default function ScaleUpDashboard() {
                   ))}
                   <label className="md:col-span-2 text-sm space-y-1">
                     <span className="block text-slate-600">Agenda</span>
-                    <textarea
-                      className="w-full border rounded px-2 py-1 h-28"
-                      value={meetingForm.agenda}
-                      onChange={(e)=> setMeetingForm((f)=> ({...f, agenda: e.target.value}))}
-                    />
+                    <textarea className="w-full border rounded px-2 py-1 h-28"
+                      value={meetingForm.agenda} onChange={(e)=> setMeetingForm((f)=> ({...f, agenda: e.target.value}))}/>
                   </label>
                   <label className="md:col-span-2 text-sm space-y-1">
                     <span className="block text-slate-600">Objectives</span>
-                    <textarea
-                      className="w-full border rounded px-2 py-1 h-20"
-                      value={meetingForm.objectives}
-                      onChange={(e)=> setMeetingForm((f)=> ({...f, objectives: e.target.value}))}
-                    />
+                    <textarea className="w-full border rounded px-2 py-1 h-20"
+                      value={meetingForm.objectives} onChange={(e)=> setMeetingForm((f)=> ({...f, objectives: e.target.value}))}/>
                   </label>
                   <label className="md:col-span-2 text-sm space-y-1">
                     <span className="block text-slate-600">Notes</span>
-                    <textarea
-                      className="w-full border rounded px-2 py-1 h-28"
-                      value={meetingForm.notes}
-                      onChange={(e)=> setMeetingForm((f)=> ({...f, notes: e.target.value}))}
-                    />
+                    <textarea className="w-full border rounded px-2 py-1 h-28"
+                      value={meetingForm.notes} onChange={(e)=> setMeetingForm((f)=> ({...f, notes: e.target.value}))}/>
                   </label>
                 </div>
                 <div className="p-4 border-t flex justify-end gap-2">
@@ -1047,6 +856,7 @@ export default function ScaleUpDashboard() {
         </section>
       )}
 
+      {/* Config */}
       {activeTab === "Config" && (
         <section className="mt-2">
           <h3 className="font-semibold mb-2">Config</h3>
@@ -1057,9 +867,7 @@ export default function ScaleUpDashboard() {
             </label>
             <label className="text-sm space-y-1">
               <span className="block text-slate-600">Units / Year ({scenario})</span>
-              <input
-                type="number"
-                className="border rounded px-2 py-1 w-full"
+              <input type="number" className="border rounded px-2 py-1 w-full"
                 value={scenarioSettings.unitsPerYear ?? 0}
                 onChange={(e) => {
                   const next = { ...(plan.scenarios || {}) };
@@ -1070,9 +878,7 @@ export default function ScaleUpDashboard() {
             </label>
             <label className="text-sm space-y-1">
               <span className="block text-slate-600">Shifts ({scenario})</span>
-              <input
-                type="number"
-                className="border rounded px-2 py-1 w-full"
+              <input type="number" className="border rounded px-2 py-1 w-full"
                 value={scenarioSettings.shifts ?? 1}
                 onChange={(e) => {
                   const next = { ...(plan.scenarios || {}) };
@@ -1088,7 +894,7 @@ export default function ScaleUpDashboard() {
   );
 }
 
-/* -------------------------------- Subcomponents ------------------------------- */
+/* Subcomponents */
 
 function StatCard({ title, value, suffix }: { title: string; value: string; suffix?: string }) {
   return (
@@ -1103,19 +909,22 @@ function SimpleGrid({
   headers,
   rows,
   onChange,
+  deletable,
+  onDelete,
 }: {
   headers: string[];
   rows: AnyRow[];
   onChange: (rows: AnyRow[]) => void;
+  deletable?: boolean;
+  onDelete?: (idx: number) => void;
 }) {
   return (
     <div className="rounded border overflow-x-auto">
       <table className="w-full text-sm">
         <thead className="bg-slate-50 text-xs">
           <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
-            {headers.map((h) => (
-              <th key={h}>{h}</th>
-            ))}
+            {headers.map((h) => (<th key={h}>{h}</th>))}
+            {deletable ? <th>Delete</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -1134,6 +943,13 @@ function SimpleGrid({
                   />
                 </td>
               ))}
+              {deletable ? (
+                <td className="px-3 py-2">
+                  <button onClick={() => onDelete && onDelete(i)} className="text-red-600 border rounded px-2 py-1">
+                    Delete
+                  </button>
+                </td>
+              ) : null}
             </tr>
           ))}
         </tbody>
