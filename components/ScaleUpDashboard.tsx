@@ -7,6 +7,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Plus, Trash2, FileText, CalendarPlus2, Loader2, Download } from "lucide-react";
 import { generateWeeklySummary } from "@/lib/utils";
 import { clone, SEED_PLAN } from "@/lib/constants";
+import OverviewPanel from "@/components/OverviewPanel";
 
 /**
  * ScaleUpDashboard
@@ -1262,15 +1263,15 @@ Generated: ${new Date().toLocaleString()}
       {renderTabs()}
       {error && <div className="px-3 py-2 text-sm text-red-600">{error}</div>}
 
-      {tab === "overview" && (
-        <div className="px-3 py-4">
-          <h2 className="text-lg font-semibold">Overview</h2>
-          <p className="mt-2 text-sm text-slate-600">
-            Use the tabs above to manage Projects, Manufacturing, Resources, Risks, Meetings, KPIs, Financials, and Glossary.
-            All changes save automatically for your workspace.
-          </p>
-        </div>
-      )}
+      <OverviewPanel
+  scenario={scenario}
+  variant={variant}
+  projects={currentVariantData.projects || []}
+  processes={manufacturingProcesses || currentVariantData.processes || []}
+  capexRows={scenario === "50k" ? currentVariantData.capex50k || [] : currentVariantData.capex200k || []}
+  opexRows={scenario === "50k" ? currentVariantData.opex50k || [] : currentVariantData.opex200k || []}
+  kpis={kpis}
+/>
 
       {tab === "projects" && renderProjects()}
 
