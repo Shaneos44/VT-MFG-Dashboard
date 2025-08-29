@@ -813,8 +813,6 @@ export default function ScaleUpDashboard() {
     doc.save(fileName);
   };
 
-  const [showMeetingModal, setShowMeetingModalState] = useState(false); // to keep TS happy if shadowed (noop)
-
   if (loading) {
     return (
       <div className="min-h-[50vh] grid place-items-center">
