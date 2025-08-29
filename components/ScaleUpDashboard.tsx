@@ -10,14 +10,15 @@ import autoTable from 'jspdf-autotable'
 /**
  * ScaleUpDashboard
  *
- * - Full client component with:
- *   • Tabs: Overview, Projects, Processes, Resources, Risks, Financials, Meetings, KPIs, Glossary
- *   • Add/Delete row buttons on each tab
- *   • Text wraps in table cells and columns are wide enough to avoid hidden text
- *   • Autosaves ALL data (every tab) via /api/configurations (Supabase-backed) with debounce
- *   • Loads saved data on mount and does not reset on refresh
- *   • Meeting modal with agenda/notes & export meeting summary to PDF
- *   • CEO Summary PDF button
+ * Tabs: Overview, Projects, Processes, Resources, Risks, Financials, Meetings, KPIs, Glossary
+ * - Add/Delete row buttons on each tab
+ * - Autosaves ALL data (every tab) via /api/configurations (Supabase-backed) with debounce
+ * - Loads saved data on mount and does not reset on refresh
+ * - Meeting modal with agenda/notes & export meeting summary to PDF
+ * - CEO Summary PDF button
+ *
+ * NOTE (per your request): Only the Projects tab formatting has been changed here
+ * to ensure long text is visible (wrapping + textareas on long columns).
  */
 
 // ---------------- Types ----------------
@@ -297,7 +298,7 @@ export default function ScaleUpDashboard() {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
       saveToServer()
-    }, 1200) // 1.2s debounce across the whole dashboard
+    }, 1200)
   }, [saveToServer])
 
   const loadFromServer = useCallback(async () => {
@@ -305,7 +306,6 @@ export default function ScaleUpDashboard() {
       setLoading(true)
       const res = await fetch('/api/configurations', { method: 'GET' })
       if (!res.ok) {
-        // Keep defaults if unauthenticated; user will sign in
         const j = await res.json().catch(() => ({}))
         console.warn('[Load] not OK', res.status, j)
         return
@@ -468,7 +468,7 @@ export default function ScaleUpDashboard() {
     setKpis((prev) => prev.map((k, i) => (i === rowIndex ? { ...k, [key]: key.includes('value') ? Number(value) || 0 : value } : k)))
   }
 
-  // --------------- PDF: Meeting Summary ---------------
+  // --------------- Meeting helpers ---------------
 
   const openNewMeetingModal = () => {
     setEditingMeetingIndex(null)
@@ -847,8 +847,9 @@ export default function ScaleUpDashboard() {
               <Button onClick={() => addRow('projects')} className="gap-2"><Plus className="h-4 w-4"/>Add Project</Button>
             </div>
           </div>
+          {/* PROJECTS: formatting-only update — table-auto + textarea for long fields + wider minWidths */}
           <div className="overflow-auto rounded border">
-            <table className="w-full table-fixed">
+            <table className="w-full table-auto">
               <thead className="bg-slate-50 text-slate-600 text-sm">
                 <tr>
                   {[
@@ -863,19 +864,55 @@ export default function ScaleUpDashboard() {
               <tbody className="text-sm">
                 {projects.map((row, ri) => (
                   <tr key={ri} className="align-top">
-                    {Array.from({ length: 24 }).map((_, ci) => (
-                      <td
-                        key={ci}
-                        className="border-b p-2 align-top break-words whitespace-pre-wrap"
-                        style={{ minWidth: ci === 1 || ci === 8 || ci === 9 || ci === 15 || ci === 16 ? 260 : 140, maxWidth: 360 }}
-                      >
-                        <input
-                          className="w-full border rounded px-2 py-1 text-sm"
-                          value={String(row?.[ci] ?? '')}
-                          onChange={(e) => updateCell(setProjects, ri, ci, e.target.value)}
-                        />
-                      </td>
-                    ))}
+                    {Array.from({ length: 24 }).map((_, ci) => {
+                      const isLong =
+                        ci === 1  || // Name
+                        ci === 7  || // Dependencies
+                        ci === 8  || // Deliverables
+                        ci === 9  || // Goals
+                        ci === 14 || // Needs
+                        ci === 15 || // Barriers
+                        ci === 16 || // Risks
+                        ci === 20    // Link (can be long)
+                      const minWidth =
+                        ci === 1 || ci === 8 || ci === 9 ? 360 :
+                        ci === 14 || ci === 15 || ci === 16 ? 320 :
+                        ci === 7 ? 260 :
+                        ci === 4 ? 200 :
+                        ci === 0 ? 180 :
+                        ci === 5 || ci === 6 ? 160 :
+                        ci === 20 ? 280 :
+                        ci >= 10 && ci <= 13 ? 90 :
+                        160
+
+                      return (
+                        <td
+                          key={ci}
+                          className="border-b p-2 align-top"
+                          style={{ minWidth, maxWidth: Math.max(minWidth, 420) }}
+                        >
+                          {isLong ? (
+                            <textarea
+                              className="w-full border rounded px-2 py-1 text-sm leading-snug resize-y whitespace-pre-wrap break-words"
+                              rows={3}
+                              value={String(row?.[ci] ?? '')}
+                              onChange={(e) => updateCell(setProjects, ri, ci, e.target.value)}
+                              onInput={(e) => {
+                                const el = e.currentTarget
+                                el.style.height = 'auto'
+                                el.style.height = `${el.scrollHeight}px`
+                              }}
+                            />
+                          ) : (
+                            <input
+                              className="w-full border rounded px-2 py-1 text-sm"
+                              value={String(row?.[ci] ?? '')}
+                              onChange={(e) => updateCell(setProjects, ri, ci, e.target.value)}
+                            />
+                          )}
+                        </td>
+                      )
+                    })}
                     <td className="border-b p-2">
                       <Button variant="destructive" className="gap-2" onClick={() => deleteRow('projects', ri)}>
                         <Trash2 className="h-4 w-4"/>Delete
