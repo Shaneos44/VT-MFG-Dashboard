@@ -56,4 +56,9 @@
   body {
     @apply bg-background text-foreground;
   }
+  /* ScaleUp projects table improvements */
+.dashboard-table { table-layout: auto; width: 100%; }
+.dashboard-table th, .dashboard-table td { vertical-align: top; }
+.dashboard-wrap { white-space: normal; word-break: break-word; text-wrap: wrap; }
+
 }
