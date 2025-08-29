@@ -1,160 +1,326 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, TrendingUp, Plus, Trash2, FileText, Save, CalendarPlus, BarChart2 } from "lucide-react";
-import jsPDF from "jspdf";
-import autoTable from "jspdf-autotable";
-import { Button } from "@/components/ui/button";
-import { generateWeeklySummary } from "@/lib/utils";
-import { clone, SEED_PLAN } from "@/lib/constants";
 
 /**
- * This component renders a tabbed dashboard. Only the active tab content is shown.
- * Autosave persists to /api/configurations. CAPEX/OPEX are derived from Financials tab.
+ * IMPORTANT
+ * - This component persists EVERYTHING to /api/configurations (same name key) so it survives refresh & multi-user.
+ * - jsPDF & autoTable are loaded with dynamic import inside the functions to avoid SSR build errors.
+ * - Projects table cells wrap by default (whitespace-normal break-words), and each column gets a sensible min width.
  */
 
-type AnyRow = any[];
+/* ----------------------------- Types & helpers ---------------------------- */
 
-type KPI = {
-  id: string;
-  scenario_id: string;
-  name: string;
-  target_value: number;
-  current_value: number;
-  unit: string;
-  owner: string;
-  created_at: string;
-  updated_at: string;
+type AnyRow = (string | number | boolean | null | undefined)[];
+
+type PlanState = {
+  variant: string; // e.g., "Recess N..."
+  scenario: "50k" | "200k";
+  projects: AnyRow[];
+  processes: AnyRow[];
+  resources: AnyRow[];
+  risks: AnyRow[];
+  kpis: {
+    id: string;
+    name: string;
+    unit: string;
+    owner: string;
+    target_value: number;
+    current_value: number;
+  }[];
+  financials: {
+    id: string;
+    category: "CapEx" | "OpEx" | "Revenue";
+    item: string;
+    amount: number;
+    type: "Expense" | "Income" | "Both";
+    notes?: string;
+    scenario: "50k" | "200k" | "Both";
+  }[];
+  glossary: AnyRow[];
+  meetings: AnyRow[];
+  scenarios?: {
+    ["50k"]?: { unitsPerYear?: number; hoursPerDay?: number; shifts?: number };
+    ["200k"]?: { unitsPerYear?: number; hoursPerDay?: number; shifts?: number };
+  };
 };
 
-type Variant = "Recess Nanodispensing" | "Dipcoating";
+const CONFIG_NAME = "ScaleUp-Dashboard-Config";
 
-const MOSCOW = ["Must", "Should", "Could", "Won't"] as const;
-const IMPACT = ["H", "M", "L"] as const;
-const PROB = ["H", "M", "L"] as const;
-
-const TABS = [
-  "Overview",
-  "Projects",
-  "Processes",
-  "Resources",
-  "Risks",
-  "Financials",
-  "KPIs",
-  "Meetings",
-  "Glossary",
-] as const;
-type TabName = (typeof TABS)[number];
-
-function toNumber(x: any): number {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : 0;
+/** simple debounce */
+function useDebouncedCallback<T extends (...args: any[]) => void>(fn: T, delay = 1200) {
+  const t = useRef<ReturnType<typeof setTimeout> | null>(null);
+  return useCallback(
+    (...args: Parameters<T>) => {
+      if (t.current) clearTimeout(t.current);
+      t.current = setTimeout(() => fn(...args), delay);
+    },
+    [fn, delay]
+  );
 }
 
-function getScenarioFromFinancialRow(row: AnyRow): "50k" | "200k" | "Both" {
-  const scenarioCell = row?.[5];
-  const val = String(scenarioCell ?? "Both").trim();
-  if (val.toLowerCase() === "50k") return "50k";
-  if (val.toLowerCase() === "200k") return "200k";
-  return "Both";
-}
+/* ----------------------------- Default data ------------------------------ */
 
-function sumCapexFromFinancials(rows: AnyRow[], scenario: "50k" | "200k"): number {
-  return rows.reduce((sum, r) => {
-    const category = String(r?.[0] ?? "").toLowerCase();
-    if (category !== "capex") return sum;
-    const sc = getScenarioFromFinancialRow(r);
-    if (!(sc === "Both" || sc === scenario)) return sum;
-    const amount = toNumber(r?.[2]);
-    return sum + amount;
-  }, 0);
-}
+const DEFAULT_PLAN: PlanState = {
+  variant: "Recess Nanodispensing",
+  scenario: "200k",
+  projects: [],
+  processes: [],
+  resources: [],
+  risks: [],
+  kpis: [
+    { id: "KPI-1", name: "Yield", unit: "%", owner: "Ops", target_value: 98, current_value: 92 },
+    { id: "KPI-2", name: "Cycle Time", unit: "s", owner: "Manufacturing", target_value: 12, current_value: 14 },
+  ],
+  financials: [
+    {
+      id: "FIN-REV-1",
+      category: "Revenue",
+      item: "Product Sales",
+      amount: 2250000,
+      type: "Income",
+      notes: "Projected annual revenue",
+      scenario: "Both",
+    },
+    {
+      id: "FIN-CAP-1",
+      category: "CapEx",
+      item: "Pick & Place Cell",
+      amount: 450000,
+      type: "Expense",
+      notes: "Robotics, fixtures, install",
+      scenario: "200k",
+    },
+    {
+      id: "FIN-OPEX-1",
+      category: "OpEx",
+      item: "Operators (2 FTE)",
+      amount: 180000,
+      type: "Expense",
+      notes: "Salaries incl. on-costs",
+      scenario: "Both",
+    },
+  ],
+  glossary: [],
+  meetings: [],
+  scenarios: {
+    "50k": { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 },
+    "200k": { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 },
+  },
+};
 
-function sumOpexFromFinancials(rows: AnyRow[], scenario: "50k" | "200k"): number {
-  return rows.reduce((sum, r) => {
-    const category = String(r?.[0] ?? "").toLowerCase();
-    if (category !== "opex") return sum;
-    const sc = getScenarioFromFinancialRow(r);
-    if (!(sc === "Both" || sc === scenario)) return sum;
-    const amount = toNumber(r?.[2]);
-    return sum + amount;
-  }, 0);
-}
+/* ------------------------------ Main component --------------------------- */
 
 export default function ScaleUpDashboard() {
-  // Core UI & global controls
-  const [activeTab, setActiveTab] = useState<TabName>("Overview");
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<
+    "Overview" | "Projects" | "Manufacturing" | "Resources" | "Risks" | "KPIs" | "Financials" | "Glossary" | "Meetings" | "Config"
+  >("Overview");
 
-  // High-level configuration
-  const [scenario, setScenario] = useState<"50k" | "200k">("50k");
-  const [variant, setVariant] = useState<Variant>("Recess Nanodispensing");
+  const [plan, setPlan] = useState<PlanState>(DEFAULT_PLAN);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [saving, setSaving] = useState<"idle" | "saving" | "saved">("idle");
 
-  // Plan (seeded)
-  const [plan, setPlan] = useState<any>(() => {
-    const initialPlan = clone(SEED_PLAN);
-    if (!initialPlan?.scenarios) {
-      initialPlan.scenarios = {
-        "50k": { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 },
-        "200k": { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 },
-      };
+  const scenario = plan.scenario;
+  const scenarioSettings = plan.scenarios?.[scenario] ?? (scenario === "50k"
+    ? { unitsPerYear: 50000, hoursPerDay: 8, shifts: 1 }
+    : { unitsPerYear: 200000, hoursPerDay: 16, shifts: 2 });
+
+  /* ------------------------------ Load / Save ------------------------------ */
+
+  const loadConfig = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await fetch("/api/configurations", { method: "GET", cache: "no-store" });
+      if (!res.ok) throw new Error(`GET /api/configurations failed: ${res.status}`);
+      const rows = (await res.json()) as any[];
+      // choose the most recent config with our name (if you keep multiple)
+      const row = rows.find((r) => r.name === CONFIG_NAME) ?? rows[0];
+      if (row?.data) {
+        setPlan({ ...DEFAULT_PLAN, ...row.data });
+      } else {
+        // first use for this user → create a default record immediately
+        await saveConfig(DEFAULT_PLAN, true);
+        setPlan(DEFAULT_PLAN);
+      }
+    } catch (e) {
+      console.error(e);
+      // fallback to default
+      setPlan(DEFAULT_PLAN);
+    } finally {
+      setLoading(false);
     }
-    return initialPlan;
-  });
+  }, []);
 
-  // Tables data
-  const [projects, setProjects] = useState<AnyRow[]>([]);
-  const [processes, setProcesses] = useState<AnyRow[]>([]);
-  const [resources, setResources] = useState<AnyRow[]>([]);
-  const [risks, setRisks] = useState<AnyRow[]>([]);
-  const [financialData, setFinancialData] = useState<AnyRow[]>([
-    // Category, Item, Amount, Type, Notes, Scenario?
-    ["Revenue", "Product Sales", 2250000, "Income", "Projected annual revenue", "Both"],
-    ["OpEx", "Operating Expenses", 450000, "Expense", "General overhead", "Both"],
-    ["CapEx", "Equipment Investment", 750000, "Investment", "Core equipment", "Both"],
-  ]);
-  const [meetings, setMeetings] = useState<AnyRow[]>([]);
-  const [glossary, setGlossary] = useState<AnyRow[]>([
-    ["IHCL", "Ion-Implanted Hydrophilic Coating Layer - Surface treatment process"],
-    ["OCP", "Open Circuit Potential - Electrochemical measurement technique"],
-  ]);
-  const [hiring, setHiring] = useState<AnyRow[]>([]);
-
-  // KPIs
-  const [kpis, setKpis] = useState<KPI[]>([
-    {
-      id: "kpi-1",
-      scenario_id: "default-scenario",
-      name: "Production Efficiency",
-      target_value: 95,
-      current_value: 87,
-      unit: "%",
-      owner: "Production Manager",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
+  const saveConfig = useCallback(
+    async (state: PlanState, isInitial = false) => {
+      try {
+        setSaving("saving");
+        const res = await fetch("/api/configurations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: CONFIG_NAME,
+            description: "ScaleUp dashboard configuration",
+            data: state,
+            modified_by: "dashboard",
+          }),
+        });
+        if (!res.ok) throw new Error(`POST /api/configurations failed: ${res.status}`);
+        setSaving("saved");
+        if (!isInitial) {
+          setTimeout(() => setSaving("idle"), 1200);
+        }
+      } catch (e) {
+        console.error(e);
+        setSaving("idle");
+      }
     },
-    {
-      id: "kpi-2",
-      scenario_id: "default-scenario",
-      name: "Quality Score",
-      target_value: 98,
-      current_value: 94,
-      unit: "%",
-      owner: "Quality Engineer",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-  ]);
+    []
+  );
 
-  // Meetings modal
+  useEffect(() => {
+    loadConfig();
+  }, [loadConfig]);
+
+  // Debounced autosave on any plan change
+  const debouncedSave = useDebouncedCallback((next: PlanState) => saveConfig(next), 1400);
+  useEffect(() => {
+    if (!loading) debouncedSave(plan);
+  }, [plan, debouncedSave, loading]);
+
+  /* ---------------------------- Derived metrics ---------------------------- */
+
+  const { capexTotal, opexTotal } = useMemo(() => {
+    // Finance rows drive CapEx & OpEx (scenario-aware)
+    const rows = plan.financials;
+    const matchesScenario = (rowScenario: "50k" | "200k" | "Both") =>
+      rowScenario === "Both" || rowScenario === scenario;
+
+    const capex = rows
+      .filter((r) => r.category === "CapEx" && matchesScenario(r.scenario))
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+    const opex = rows
+      .filter((r) => r.category === "OpEx" && matchesScenario(r.scenario))
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+
+    return { capexTotal: capex, opexTotal: opex };
+  }, [plan.financials, scenario]);
+
+  const cpu = useMemo(() => {
+    const units = scenarioSettings.unitsPerYear || 0;
+    return units > 0 ? opexTotal / units : 0;
+  }, [opexTotal, scenarioSettings.unitsPerYear]);
+
+  const kpiAvg = useMemo(() => {
+    if (!plan.kpis.length) return 0;
+    const acc =
+      plan.kpis.reduce((sum, k) => {
+        const tv = Number(k.target_value) || 0;
+        const cv = Number(k.current_value) || 0;
+        return sum + (tv ? (cv / tv) * 100 : 0);
+      }, 0) / plan.kpis.length;
+    return isFinite(acc) ? acc : 0;
+  }, [plan.kpis]);
+
+  const marginPct = useMemo(() => {
+    // simple illustrative P&L using revenue rows from financials
+    const revenue = plan.financials
+      .filter((r) => r.category === "Revenue" && (r.scenario === "Both" || r.scenario === scenario))
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const grossProfit = revenue - (capexTotal + opexTotal);
+    return revenue > 0 ? (grossProfit / revenue) * 100 : 0;
+  }, [plan.financials, capexTotal, opexTotal, scenario]);
+
+  /* -------------------------------- UI helpers ----------------------------- */
+
+  const updatePlan = <K extends keyof PlanState>(key: K, value: PlanState[K]) =>
+    setPlan((p) => ({ ...p, [key]: value }));
+
+  const addProject = () => {
+    const id = `PROJ-${String(plan.projects.length + 1).padStart(3, "0")}`;
+    const row: AnyRow = [
+      id, // 0 id
+      "New Project", // 1 name
+      "Plan", // 2 type/phase
+      "Must", // 3 moscow
+      "Project Manager", // 4 owner
+      new Date().toISOString().slice(0, 10), // 5 start
+      new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString().slice(0, 10), // 6 finish
+      0, // 7 dependencies
+      "", // 8 deliverables
+      "", // 9 goal
+      "", // 10 R
+      "", // 11 A
+      "", // 12 C
+      "", // 13 I
+      "", // 14 needs
+      "", // 15 barriers
+      "", // 16 risks
+      0, // 17 budget capex
+      0, // 18 budget opex
+      0, // 19 progress %
+      "", // 20 process link
+      "No", // 21 critical
+      "GREEN", // 22 status
+      0, // 23 slack days
+      "", // 24 actions
+      "", // 25 notes
+    ];
+    updatePlan("projects", [row, ...plan.projects]);
+  };
+
+  const addProcess = () => {
+    const row: AnyRow = ["New Process", 10, 1, 12, "Fixture", "Planned", "Ops"]; // Process, Time, Batch, Cycle, Equipment, Status, Owner
+    updatePlan("processes", [row, ...plan.processes]);
+  };
+
+  const addResource = () => {
+    const row: AnyRow = ["New Resource", "Personnel", 1, 0, "Department", ""]; // resource, type, qty, cost, dept, notes
+    updatePlan("resources", [row, ...plan.resources]);
+  };
+
+  const addRisk = () => {
+    const row: AnyRow = [
+      `RISK-${plan.risks.length + 1}`,
+      "New risk",
+      "High",
+      "Medium",
+      "Mitigation plan",
+      "Owner",
+      "Open",
+      "",
+    ];
+    updatePlan("risks", [row, ...plan.risks]);
+  };
+
+  const addFinancialRow = () => {
+    const row: PlanState["financials"][number] = {
+      id: `FIN-${Date.now()}`,
+      category: "OpEx",
+      item: "New cost item",
+      amount: 0,
+      type: "Expense",
+      notes: "",
+      scenario: "Both",
+    };
+    updatePlan("financials", [row, ...plan.financials]);
+  };
+
+  const removeFinancialRow = (idx: number) => {
+    const next = [...plan.financials];
+    next.splice(idx, 1);
+    updatePlan("financials", next);
+  };
+
+  /* --------------------------- Meetings (modal) ---------------------------- */
+
   const [showMeetingModal, setShowMeetingModal] = useState(false);
   const [editingMeetingIndex, setEditingMeetingIndex] = useState<number | null>(null);
   const [meetingForm, setMeetingForm] = useState({
     id: "",
     title: "New Meeting",
-    date: new Date().toISOString().split("T")[0],
+    date: new Date().toISOString().slice(0, 10),
     time: "10:00",
     duration: "60 min",
     attendees: "Project Team, Stakeholders",
@@ -165,349 +331,12 @@ export default function ScaleUpDashboard() {
     notes: "",
   });
 
-  const autoSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Derived totals from FINANCIALS (single source of truth)
-  const capexTotal50 = useMemo(() => sumCapexFromFinancials(financialData, "50k"), [financialData]);
-  const capexTotal200 = useMemo(() => sumCapexFromFinancials(financialData, "200k"), [financialData]);
-  const opexTotal50 = useMemo(() => sumOpexFromFinancials(financialData, "50k"), [financialData]);
-  const opexTotal200 = useMemo(() => sumOpexFromFinancials(financialData, "200k"), [financialData]);
-
-  // Scenario & CPU/Financial metrics
-  const sc = plan?.scenarios?.[scenario] ?? {
-    unitsPerYear: scenario === "50k" ? 50000 : 200000,
-    hoursPerDay: 8,
-    shifts: 1,
-  };
-
-  const opexSelected = scenario === "50k" ? opexTotal50 : opexTotal200;
-  const capexSelected = scenario === "50k" ? capexTotal50 : capexTotal200;
-
-  const cpu = sc.unitsPerYear ? opexSelected / sc.unitsPerYear : 0;
-  const pricePerUnit = 45;
-  const revenue = (sc.unitsPerYear || 0) * pricePerUnit;
-  const grossProfit = revenue - (capexSelected + opexSelected);
-  const marginPct = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
-
-  // --- Save / Load from Supabase via API routes ---
-  const saveProjectDataToDatabase = useCallback(async () => {
-    try {
-      setSaving(true);
-
-      const projectData = {
-        plan,
-        scenario,
-        variant,
-        tables: {
-          projects,
-          processes,
-          resources,
-          risks,
-          financialData,
-          meetings,
-          glossary,
-          hiring,
-        },
-        kpis,
-        lastSaved: new Date().toISOString(),
-      };
-
-      const response = await fetch("/api/configurations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: "ScaleUp-Dashboard-Config",
-          description: "ScaleUp Dashboard Configuration",
-          data: projectData,
-          modified_by: "user",
-          upsert: true,
-        }),
-      });
-
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ error: "Failed to save" }));
-        console.error("Save error:", err);
-        setError(err?.error || "Failed to save data.");
-      }
-    } catch (e: any) {
-      console.error("Save failed:", e);
-      setError(e?.message || "Failed to save data.");
-    } finally {
-      setSaving(false);
-    }
-  }, [plan, scenario, variant, projects, processes, resources, risks, financialData, meetings, glossary, hiring, kpis]);
-
-  const broadcastDataUpdate = useCallback(() => {
-    if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
-    autoSaveTimeoutRef.current = setTimeout(() => {
-      saveProjectDataToDatabase();
-    }, 1200);
-  }, [saveProjectDataToDatabase]);
-
-  useEffect(() => {
-    const load = async () => {
-      try {
-        setLoading(true);
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-        const res = await fetch("/api/configurations", { signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const configs = await res.json();
-          let latest = configs.find((c: any) => c.name === "ScaleUp-Dashboard-Config");
-          if (!latest && configs?.length) {
-            latest = configs.sort(
-              (a: any, b: any) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime(),
-            )[0];
-          }
-          if (latest?.data) {
-            const d = latest.data;
-
-            if (d.plan) setPlan(d.plan);
-            if (d.scenario) setScenario(d.scenario);
-            if (d.variant) setVariant(d.variant);
-
-            if (d.tables) {
-              setProjects(Array.isArray(d.tables.projects) ? d.tables.projects : []);
-              setProcesses(Array.isArray(d.tables.processes) ? d.tables.processes : []);
-              setResources(Array.isArray(d.tables.resources) ? d.tables.resources : []);
-              setRisks(Array.isArray(d.tables.risks) ? d.tables.risks : []);
-              setFinancialData(Array.isArray(d.tables.financialData) ? d.tables.financialData : []);
-              setMeetings(Array.isArray(d.tables.meetings) ? d.tables.meetings : []);
-              setGlossary(Array.isArray(d.tables.glossary) ? d.tables.glossary : []);
-              setHiring(Array.isArray(d.tables.hiring) ? d.tables.hiring : []);
-            }
-            if (Array.isArray(d.kpis)) setKpis(d.kpis);
-          }
-        }
-      } catch {
-        // use defaults
-      } finally {
-        setLoading(false);
-      }
-    };
-    load();
-  }, []);
-
-  // Trigger autosave when key tables change
-  useEffect(() => {
-    if (!loading) broadcastDataUpdate();
-  }, [projects, processes, resources, risks, financialData, meetings, glossary, hiring, kpis, loading, broadcastDataUpdate]);
-
-  // ----------------- Projects Tab -----------------
-  const projectHeaders = [
-    "ID",
-    "Name",
-    "Type/Phase",
-    "MoSCoW",
-    "Owner",
-    "Start",
-    "Finish",
-    "Dependencies",
-    "Deliverables",
-    "Goal",
-    "R",
-    "A",
-    "C",
-    "I",
-    "Needs",
-    "Barriers",
-    "Risks",
-    "Budget CapEx",
-    "Budget OpEx",
-    "Progress %",
-    "Process Link",
-    "Critical",
-    "Status",
-    "Slack Days",
-  ];
-
-  const addProject = () => {
-    const row: AnyRow = [
-      `PROJ-${Date.now()}`,
-      "New Project",
-      "Planning",
-      "Must",
-      "Owner",
-      new Date().toISOString().split("T")[0],
-      new Date(Date.now() + 21 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      "",
-      "Deliverables here",
-      "Project goals here",
-      "R",
-      "A",
-      "C",
-      "I",
-      "needs",
-      "barriers",
-      "risks",
-      0,
-      0,
-      0,
-      "",
-      "false",
-      "GREEN",
-      0,
-    ];
-    setProjects((prev) => [row, ...prev]);
-  };
-
-  const deleteProject = (index: number) => {
-    setProjects((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const setProjectCell = (rowIndex: number, colIndex: number, value: any) => {
-    setProjects((prev) => {
-      const next = [...prev];
-      if (!next[rowIndex]) return prev;
-      const isNumeric = [17, 18, 19, 23].includes(colIndex);
-      next[rowIndex][colIndex] = isNumeric ? toNumber(value) : value;
-      return next;
-    });
-  };
-
-  // ----------------- Processes Tab -----------------
-  const processHeaders = ["Process", "Time (min)", "Batch Size", "Yield (%)", "Cycle (s)", "Equipment", "Type", "Status", "Owner"];
-
-  const addProcess = () => {
-    const row: AnyRow = ["New Process", 0, 1, 100, 0, "Manual Station", "Manual", "Planning", "Owner"];
-    setProcesses((prev) => [row, ...prev]);
-  };
-
-  const deleteProcess = (index: number) => {
-    setProcesses((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const setProcessCell = (rowIndex: number, colIndex: number, value: any) => {
-    setProcesses((prev) => {
-      const next = [...prev];
-      if (!next[rowIndex]) return prev;
-      const isNumeric = [1, 2, 3, 4].includes(colIndex);
-      next[rowIndex][colIndex] = isNumeric ? toNumber(value) : value;
-      return next;
-    });
-  };
-
-  // ----------------- Resources Tab -----------------
-  const resourcesHeaders = ["Resource", "Type", "Quantity", "Cost", "Department", "Notes"];
-
-  const addResource = () => {
-    const row: AnyRow = ["New Resource", "Personnel", 1, 0, "Department", "Notes"];
-    setResources((prev) => [row, ...prev]);
-  };
-
-  const deleteResource = (index: number) => {
-    setResources((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const setResourceCell = (rowIndex: number, colIndex: number, value: any) => {
-    setResources((prev) => {
-      const next = [...prev];
-      if (!next[rowIndex]) return prev;
-      const isNumeric = [2, 3].includes(colIndex);
-      next[rowIndex][colIndex] = isNumeric ? toNumber(value) : value;
-      return next;
-    });
-  };
-
-  // ----------------- Risks Tab -----------------
-  const risksHeaders = ["ID", "Risk", "Impact", "Prob", "Mitigation", "Owner", "Due", "Status"];
-
-  const addRisk = () => {
-    const row: AnyRow = [
-      `RISK-${Date.now()}`,
-      "New Risk Description",
-      "M",
-      "M",
-      "Mitigation plan",
-      "Owner",
-      new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-      "Open",
-    ];
-    setRisks((prev) => [row, ...prev]);
-  };
-
-  const deleteRisk = (index: number) => {
-    setRisks((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const setRiskCell = (rowIndex: number, colIndex: number, value: any) => {
-    setRisks((prev) => {
-      const next = [...prev];
-      if (!next[rowIndex]) return prev;
-      next[rowIndex][colIndex] = value;
-      return next;
-    });
-  };
-
-  // ----------------- Financials Tab -----------------
-  const financialHeaders = ["Category", "Item", "Amount", "Type", "Notes", "Scenario"];
-
-  const addFinancial = () => {
-    const row: AnyRow = ["OpEx", "New Item", 0, "Expense", "", "Both"];
-    setFinancialData((prev) => [row, ...prev]);
-  };
-
-  const deleteFinancial = (index: number) => {
-    setFinancialData((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const setFinancialCell = (rowIndex: number, colIndex: number, value: any) => {
-    setFinancialData((prev) => {
-      const next = [...prev];
-      if (!next[rowIndex]) return prev;
-      if (colIndex === 2) {
-        next[rowIndex][colIndex] = toNumber(value);
-      } else {
-        next[rowIndex][colIndex] = value;
-      }
-      return next;
-    });
-  };
-
-  // ----------------- KPIs Tab -----------------
-  const addKPI = () => {
-    const k: KPI = {
-      id: `kpi-${Date.now()}`,
-      scenario_id: `scenario-${scenario}`,
-      name: "New KPI",
-      target_value: 100,
-      current_value: 0,
-      unit: "%",
-      owner: "Team Lead",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    setKpis((prev) => [...prev, k]);
-  };
-
-  const deleteKPI = (id: string) => {
-    setKpis((prev) => prev.filter((k) => k.id !== id));
-  };
-
-  const setKpiField = (id: string, field: keyof KPI, value: any) => {
-    setKpis((prev) =>
-      prev.map((k) =>
-        k.id === id
-          ? {
-              ...k,
-              [field]: field === "current_value" || field === "target_value" ? toNumber(value) : value,
-              updated_at: new Date().toISOString(),
-            }
-          : k,
-      ),
-    );
-  };
-
-  // ----------------- Meetings Tab (Modal + Export) -----------------
   const openNewMeetingModal = () => {
     setEditingMeetingIndex(null);
     setMeetingForm({
       id: `MEET-${Date.now()}`,
       title: "New Meeting",
-      date: new Date().toISOString().split("T")[0],
+      date: new Date().toISOString().slice(0, 10),
       time: "10:00",
       duration: "60 min",
       attendees: "Project Team, Stakeholders",
@@ -521,12 +350,12 @@ export default function ScaleUpDashboard() {
   };
 
   const openEditMeetingModal = (rowIndex: number) => {
-    const row = meetings[rowIndex] || [];
+    const row = plan.meetings[rowIndex] || [];
     setEditingMeetingIndex(rowIndex);
     setMeetingForm({
       id: String(row[0] || `MEET-${Date.now()}`),
       title: String(row[1] || "Meeting"),
-      date: String(row[2] || new Date().toISOString().split("T")[0]),
+      date: String(row[2] || new Date().toISOString().slice(0, 10)),
       time: String(row[3] || "10:00"),
       duration: String(row[4] || "60 min"),
       attendees: String(row[10] || row[5] || "Team"),
@@ -540,6 +369,7 @@ export default function ScaleUpDashboard() {
   };
 
   const saveMeetingFromModal = () => {
+    const rows = [...plan.meetings];
     const newRow: AnyRow = [
       meetingForm.id,
       meetingForm.title,
@@ -554,18 +384,22 @@ export default function ScaleUpDashboard() {
       meetingForm.notes,
       meetingForm.attendees,
     ];
-    setMeetings((prev) => {
-      if (editingMeetingIndex === null) return [newRow, ...prev];
-      const next = [...prev];
-      next[editingMeetingIndex] = newRow;
-      return next;
-    });
+    if (editingMeetingIndex === null) {
+      rows.unshift(newRow);
+    } else {
+      rows[editingMeetingIndex] = newRow;
+    }
+    updatePlan("meetings", rows);
     setShowMeetingModal(false);
     setEditingMeetingIndex(null);
   };
 
-  const exportMeetingSummary = (rowIndex: number) => {
-    const row = meetings[rowIndex] || [];
+  const exportMeetingSummary = async (rowIndex: number) => {
+    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+      import("jspdf"),
+      import("jspdf-autotable"),
+    ]);
+    const row = plan.meetings[rowIndex] || [];
     const title = String(row[1] || "Meeting");
     const date = String(row[2] || "");
     const time = String(row[3] || "");
@@ -594,21 +428,17 @@ export default function ScaleUpDashboard() {
     doc.text(`Status: ${status}`, left, y);
     y += 24;
 
-    autoTable(doc, {
+    (autoTable as any)(doc, {
       startY: y,
       head: [["Section", "Details"]],
       body: [
         ["Objectives", objectives],
         ["Agenda", agenda],
         ["Notes / Minutes", notes],
-        ["Actions (if any)", ""],
       ],
       styles: { fontSize: 10, cellPadding: 6, valign: "top" },
       headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 140 },
-        1: { cellWidth: 380 },
-      },
+      columnStyles: { 0: { cellWidth: 140 }, 1: { cellWidth: 380 } },
       margin: { left },
       theme: "striped",
     });
@@ -616,130 +446,93 @@ export default function ScaleUpDashboard() {
     doc.save(`Meeting_${title.replace(/\s+/g, "_")}_${date}.pdf`);
   };
 
-  // ----------------- Weekly Summary TXT -----------------
-  const exportWeeklySummary = () => {
-    const summary = generateWeeklySummary();
+  /* ------------------------------- Reporting ------------------------------- */
 
-    const reportContent = `
-WEEKLY PROJECT SUMMARY - ${summary.week}
-VitalTrace Manufacturing Scale-Up Dashboard
-Scenario: ${scenario} | Variant: ${variant}
-
-═══════════════════════════════════════════════════════════════
-
-📊 PROJECT STATUS OVERVIEW
-• Projects Completed: ${summary.projectsCompleted}
-• Projects On Track: ${summary.projectsOnTrack}  
-• Projects At Risk: ${summary.projectsAtRisk}
-• Total Active Projects: ${summary.projectsCompleted + summary.projectsOnTrack + summary.projectsAtRisk}
-
-🎯 KEY MILESTONES ACHIEVED
-${summary.keyMilestones.map((m: string) => `• ${m}`).join("\n")}
-
-⚠️ CRITICAL ISSUES REQUIRING ATTENTION
-${summary.criticalIssues.length > 0 ? summary.criticalIssues.map((i: string) => `• ${i}`).join("\n") : "• No critical issues identified"}
-
-📈 KPI PERFORMANCE SUMMARY
-${summary.kpiSummary
-  .map(
-    (k: any) =>
-      `• ${k.name}: ${k.current}/${k.target} ${
-        k.trend === "up" ? "↗️" : k.trend === "down" ? "↘️" : "→"
-      }`,
-  )
-  .join("\n")}
-
-🚀 NEXT WEEK PRIORITIES
-${summary.nextWeekPriorities.map((p: string) => `• ${p}`).join("\n")}
-
-═══════════════════════════════════════════════════════════════
-
-📋 EXECUTIVE SUMMARY
-• Target Output: ${(sc.unitsPerYear || 0).toLocaleString()} units/year
-• CapEx Total: $${(scenario === "50k" ? capexTotal50 : capexTotal200).toLocaleString()}
-• OpEx Total: $${(scenario === "50k" ? opexTotal50 : opexTotal200).toLocaleString()}
-• Cost per Unit (OpEx only): $${cpu.toFixed(2)}
-• Revenue (est.): $${revenue.toLocaleString()}
-• Gross Profit (est.): $${grossProfit.toLocaleString()} (${marginPct.toFixed(1)}% margin)
-
-═══════════════════════════════════════════════════════════════
-Generated: ${new Date().toLocaleString()}
-Dashboard Version: v65
-    `.trim();
-
-    const blob = new Blob([reportContent], { type: "text/plain;charset=utf-8" });
+  const generateWeeklyText = () => {
+    const lines: string[] = [];
+    lines.push(`Variant: ${plan.variant} | Scenario: ${scenario}`);
+    lines.push(`CapEx: $${capexTotal.toLocaleString()} | OpEx: $${opexTotal.toLocaleString()} | CPU: $${cpu.toFixed(2)}`);
+    lines.push(`KPI Avg: ${kpiAvg.toFixed(1)}% | Margin: ${marginPct.toFixed(1)}%`);
+    lines.push("");
+    lines.push("Projects:");
+    plan.projects.slice(0, 20).forEach((p) => {
+      lines.push(
+        `• ${String(p?.[1] || "")} — Owner: ${String(p?.[4] || "")} — Finish ${String(p?.[6] || "")} — Status ${
+          String(p?.[22] || "")
+        } — ${Number(p?.[19] || 0)}%`
+      );
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `Weekly_Summary_${summary.week}_${variant}_${scenario}.txt`;
+    a.download = `Weekly_Summary_${plan.variant.replace(/\s+/g, "_")}_${scenario}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  // ----------------- CEO Summary PDF -----------------
-  const generateCEOReportPDF = () => {
+  const generateCEOReportPDF = async () => {
+    const [{ default: jsPDF }, { default: autoTable }] = await Promise.all([
+      import("jspdf"),
+      import("jspdf-autotable"),
+    ]);
+
     const doc = new jsPDF({ unit: "pt", format: "a4" });
     const left = 40;
     let y = 56;
 
-    const totalProjects = projects.length;
-    const completedProjects = projects.filter((p) => (Number(p?.[19]) || 0) >= 100).length;
-    const statusCol = 22;
-    const onTrack = projects.filter((p) => String(p?.[statusCol] || "").toUpperCase() === "GREEN").length;
-    const atRisk = projects.filter((p) => {
-      const s = String(p?.[statusCol] || "").toUpperCase();
-      return s === "RED" || s === "AMBER";
-    }).length;
+    const revenue = plan.financials
+      .filter((r) => r.category === "Revenue" && (r.scenario === "Both" || r.scenario === scenario))
+      .reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
 
-    const avgKpiPerformance =
-      kpis.length > 0
-        ? kpis.reduce(
-            (acc, kk) => acc + (kk.target_value ? (kk.current_value / kk.target_value) * 100 : 0),
-            0,
-          ) / kpis.length
-        : 0;
+    const grossProfit = revenue - (capexTotal + opexTotal);
+    const margin = revenue > 0 ? (grossProfit / revenue) * 100 : 0;
 
     doc.setFontSize(18);
-    doc.text(`CEO Executive Summary — ${variant} / ${scenario}`, left, y);
+    doc.text(`CEO Executive Summary — ${plan.variant} / ${scenario}`, left, y);
     y += 20;
     doc.setFontSize(11);
     doc.text(`Generated: ${new Date().toLocaleString()}`, left, y);
     y += 18;
 
-    autoTable(doc, {
+    (autoTable as any)(doc, {
       startY: y,
       head: [["Metric", "Value"]],
       body: [
-        ["Target Output (units/yr)", (sc.unitsPerYear || 0).toLocaleString()],
-        ["CapEx Total (USD)", `$${(scenario === "50k" ? capexTotal50 : capexTotal200).toLocaleString()}`],
-        ["OpEx Total (USD)", `$${(scenario === "50k" ? opexTotal50 : opexTotal200).toLocaleString()}`],
+        ["Target Output (units/yr)", `${scenarioSettings.unitsPerYear?.toLocaleString() ?? ""}`],
+        ["CapEx Total (USD)", `$${capexTotal.toLocaleString()}`],
+        ["OpEx Total (USD)", `$${opexTotal.toLocaleString()}`],
         ["Cost / Unit (OpEx only)", `$${cpu.toFixed(2)}`],
         ["Revenue (USD, est.)", `$${revenue.toLocaleString()}`],
         ["Gross Profit (USD, est.)", `$${grossProfit.toLocaleString()}`],
-        ["Profit Margin (%)", `${marginPct.toFixed(1)}%`],
+        ["Profit Margin (%)", `${margin.toFixed(1)}%`],
         [
           "Projects — Total / Completed / On-Track / At-Risk",
-          `${totalProjects} / ${completedProjects} / ${onTrack} / ${atRisk}`,
+          `${plan.projects.length} / ${plan.projects.filter((p) => (Number(p?.[19]) || 0) >= 100).length} / ${
+            plan.projects.filter((p) => String(p?.[22] || "").toUpperCase() === "GREEN").length
+          } / ${
+            plan.projects.filter((p) => {
+              const s = String(p?.[22] || "").toUpperCase();
+              return s === "RED" || s === "AMBER";
+            }).length
+          }`,
         ],
-        ["KPIs — Avg Performance", `${avgKpiPerformance.toFixed(1)}%`],
-        ["Risks — Total", `${risks.length}`],
+        ["KPIs — Avg Performance", `${kpiAvg.toFixed(1)}%`],
+        ["Risks — Total", `${plan.risks.length}`],
       ],
       styles: { fontSize: 10, cellPadding: 6, valign: "top" },
       headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 260 },
-        1: { cellWidth: 260 },
-      },
+      columnStyles: { 0: { cellWidth: 260 }, 1: { cellWidth: 260 } },
       margin: { left },
       theme: "grid",
     });
 
-    let afterSummaryY = (doc as any).lastAutoTable.finalY + 24;
+    let ay = (doc as any).lastAutoTable.finalY + 24;
 
-    autoTable(doc, {
-      startY: afterSummaryY,
+    (autoTable as any)(doc, {
+      startY: ay,
       head: [["KPI", "Current", "Target", "Δ Var (%)", "Owner"]],
-      body: kpis.map((k) => [
+      body: plan.kpis.map((k) => [
         k.name,
         `${k.current_value} ${k.unit}`,
         `${k.target_value} ${k.unit}`,
@@ -748,523 +541,201 @@ Dashboard Version: v65
       ]),
       styles: { fontSize: 9, cellPadding: 5 },
       headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 220 },
-        1: { cellWidth: 100 },
-        2: { cellWidth: 100 },
-        3: { cellWidth: 80 },
-        4: { cellWidth: 120 },
-      },
+      columnStyles: { 0: { cellWidth: 220 }, 1: { cellWidth: 100 }, 2: { cellWidth: 100 }, 3: { cellWidth: 80 }, 4: { cellWidth: 120 } },
       margin: { left },
       theme: "striped",
-      didDrawPage: (data) => {
+      didDrawPage: (data: any) => {
         doc.setFontSize(12);
         doc.text("KPI Dashboard", left, data.settings.startY - 8);
       },
     });
 
-    let afterKpiY = (doc as any).lastAutoTable.finalY + 24;
-
-    const projectBody = projects.slice(0, 20).map((p) => [
-      String(p?.[1] || ""),
-      String(p?.[4] || ""),
-      String(p?.[6] || ""),
-      String(p?.[22] || ""),
-      `${Number(p?.[19] || 0)}%`,
-    ]);
-
-    autoTable(doc, {
-      startY: afterKpiY,
-      head: [["Project", "Owner", "Finish", "Status", "Progress"]],
-      body: projectBody,
-      styles: { fontSize: 9, cellPadding: 5, overflow: "linebreak" },
-      headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 240 },
-        1: { cellWidth: 120 },
-        2: { cellWidth: 90 },
-        3: { cellWidth: 80 },
-        4: { cellWidth: 50 },
-      },
-      margin: { left },
-      theme: "striped",
-      didDrawPage: (data) => {
-        doc.setFontSize(12);
-        doc.text("Top Projects", left, data.settings.startY - 8);
-      },
-    });
-
-    let afterProjectsY = (doc as any).lastAutoTable.finalY + 24;
-
-    const riskBody = risks.slice(0, 15).map((r) => [
-      String(r?.[0] || ""),
-      String(r?.[1] || ""),
-      String(r?.[2] || ""),
-      String(r?.[3] || ""),
-      String(r?.[4] || ""),
-      String(r?.[5] || ""),
-      String(r?.[7] || ""),
-    ]);
-
-    autoTable(doc, {
-      startY: afterProjectsY,
-      head: [["ID", "Risk", "Impact", "Prob", "Mitigation", "Owner", "Status"]],
-      body: riskBody,
-      styles: { fontSize: 9, cellPadding: 5, overflow: "linebreak" },
-      headStyles: { fillColor: [15, 23, 42] },
-      columnStyles: {
-        0: { cellWidth: 70 },
-        1: { cellWidth: 210 },
-        2: { cellWidth: 60 },
-        3: { cellWidth: 60 },
-        4: { cellWidth: 180 },
-        5: { cellWidth: 80 },
-        6: { cellWidth: 60 },
-      },
-      margin: { left },
-      theme: "striped",
-      didDrawPage: (data) => {
-        doc.setFontSize(12);
-        doc.text("Key Risks", left, data.settings.startY - 8);
-      },
-    });
-
-    const fileName = `CEO_Summary_${variant.replace(/\s+/g, "_")}_${scenario}_${new Date()
+    const fileName = `CEO_Summary_${plan.variant.replace(/\s+/g, "_")}_${scenario}_${new Date()
       .toISOString()
       .slice(0, 10)}.pdf`;
     doc.save(fileName);
   };
 
-  // ----------------- Overview numbers (high level) -----------------
-  const overview = useMemo(() => {
-    const totalProjects = projects.length;
-    const completed = projects.filter((p) => (Number(p?.[19]) || 0) >= 100).length;
-    const statusCol = 22;
-    const onTrack = projects.filter((p) => String(p?.[statusCol] || "").toUpperCase() === "GREEN").length;
-    const taktSecondsAvg =
-      processes.length > 0
-        ? Math.round(
-            processes.reduce((acc, r) => acc + (Number(r?.[4]) || 0), 0) / Math.max(processes.length, 1),
-          )
-        : 0;
-
-    const kpiAvg =
-      kpis.length > 0
-        ? Math.round(
-            kpis.reduce(
-              (acc, k) =>
-                acc + (k.target_value ? (k.current_value / k.target_value) * 100 : 0),
-              0,
-            ) / kpis.length,
-          )
-        : 0;
-
-    return {
-      totalProjects,
-      completed,
-      onTrack,
-      taktSecondsAvg,
-      kpiAvg,
-      capex: capexSelected,
-      opex: opexSelected,
-      cpu,
-      revenue,
-      grossProfit,
-      marginPct,
-    };
-  }, [projects, processes, kpis, capexSelected, opexSelected, cpu, revenue, grossProfit, marginPct]);
+  /* --------------------------------- Render -------------------------------- */
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="text-center space-y-4">
-          <div className="flex items-center justify-center space-x-2">
-            <Loader2 className="h-6 w-6 animate-spin" />
-            <span className="text-lg font-medium">Loading Your Project</span>
-          </div>
-          <p className="text-sm text-muted-foreground">Retrieving your latest data...</p>
-          <Button variant="outline" onClick={() => setLoading(false)} className="mt-4">
-            Skip Loading
-          </Button>
-        </div>
+      <div className="p-6 text-slate-600">
+        Loading…
       </div>
     );
   }
 
   return (
-    <div className="p-4 md:p-6 lg:p-8 space-y-4">
-      {/* Top Bar */}
-      <div className="flex flex-wrap items-center gap-3 justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="text-xl md:text-2xl font-semibold">Scale-Up Dashboard</h1>
-          <div className="text-sm text-slate-500">Variant:</div>
+    <div className="p-4 md:p-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-center gap-3 mb-4">
+        <h1 className="text-2xl font-semibold">Scale-Up Dashboard</h1>
+
+        <div className="ml-auto flex flex-wrap gap-2">
           <select
-            className="border rounded px-2 py-1 text-sm"
-            value={variant}
-            onChange={(e) => setVariant(e.target.value as Variant)}
+            className="px-3 py-2 rounded border text-sm"
+            value={plan.variant}
+            onChange={(e) => updatePlan("variant", e.target.value)}
           >
             <option>Recess Nanodispensing</option>
-            <option>Dipcoating</option>
+            <option>Hot-Fill Syringe</option>
+            <option>Catheter Assembly</option>
           </select>
-          <div className="text-sm text-slate-500 ml-2">Scenario:</div>
+
           <select
-            className="border rounded px-2 py-1 text-sm"
-            value={scenario}
-            onChange={(e) => setScenario(e.target.value as "50k" | "200k")}
+            className="px-3 py-2 rounded border text-sm"
+            value={plan.scenario}
+            onChange={(e) => updatePlan("scenario", e.target.value as PlanState["scenario"])}
           >
             <option value="50k">50k</option>
             <option value="200k">200k</option>
           </select>
-        </div>
 
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={saveProjectDataToDatabase} className="gap-2">
-            <Save className="h-4 w-4" />
-            {saving ? "Saving..." : "Save Now"}
-          </Button>
-          <Button variant="outline" onClick={exportWeeklySummary} className="gap-2">
-            <FileText className="h-4 w-4" />
+          <button
+            onClick={() => saveConfig(plan)}
+            className="inline-flex items-center gap-2 rounded bg-slate-900 text-white px-3 py-2 text-sm"
+            title="Force save now"
+          >
+            <span className="material-symbols-outlined text-base">save</span>
+            {saving === "saving" ? "Saving…" : saving === "saved" ? "Saved" : "Save Now"}
+          </button>
+
+          <button
+            onClick={generateWeeklyText}
+            className="rounded border px-3 py-2 text-sm"
+            title="Download a TXT weekly summary"
+          >
             Weekly Report (TXT)
-          </Button>
-          <Button variant="outline" onClick={generateCEOReportPDF} className="gap-2">
-            <BarChart2 className="h-4 w-4" />
+          </button>
+
+          <button
+            onClick={generateCEOReportPDF}
+            className="rounded border px-3 py-2 text-sm"
+            title="Download a CEO-ready PDF snapshot"
+          >
             CEO Summary (PDF)
-          </Button>
-          <Button variant="default" onClick={openNewMeetingModal} className="gap-2">
-            <CalendarPlus className="h-4 w-4" />
+          </button>
+
+          <button onClick={openNewMeetingModal} className="rounded border px-3 py-2 text-sm">
             New Meeting
-          </Button>
+          </button>
         </div>
       </div>
 
-      {/* Tab Bar */}
-      <div className="w-full overflow-x-auto">
-        <div className="inline-flex gap-1 border rounded-xl p-1 bg-white">
-          {TABS.map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-3 py-1.5 rounded-lg text-sm whitespace-nowrap ${
-                activeTab === tab ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
-              }`}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
+      {/* KPI cards */}
+      <div className="grid md:grid-cols-3 xl:grid-cols-6 gap-3 mb-4">
+        <StatCard title="Target Output" value={(scenarioSettings.unitsPerYear || 0).toLocaleString()} suffix="units/year" />
+        <StatCard title="CapEx / OpEx" value={`$${capexTotal.toLocaleString()} / $${opexTotal.toLocaleString()}`} />
+        <StatCard title="CPU (OpEx only)" value={`$${cpu.toFixed(2)}`} />
+        <StatCard title="Margin (est.)" value={`${marginPct.toFixed(1)}%`} />
+        <StatCard
+          title="Projects"
+          value={`${plan.projects.length} total • ${
+            plan.projects.filter((p) => String(p?.[22] || "").toUpperCase() === "GREEN").length
+          } on track`}
+        />
+        <StatCard title="KPI Avg" value={`${kpiAvg.toFixed(1)}%`} />
       </div>
 
-      {/* TAB CONTENTS — only render active tab */}
+      {/* Tabs */}
+      <div className="flex flex-wrap gap-2 border-b mb-4">
+        {(
+          [
+            "Overview",
+            "Projects",
+            "Manufacturing",
+            "Resources",
+            "Risks",
+            "KPIs",
+            "Financials",
+            "Glossary",
+            "Meetings",
+            "Config",
+          ] as typeof activeTab[]
+        ).map((t) => (
+          <button
+            key={t}
+            onClick={() => setActiveTab(t)}
+            className={`px-3 py-2 text-sm rounded-t ${
+              activeTab === t ? "bg-slate-900 text-white" : "bg-slate-100 hover:bg-slate-200"
+            }`}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* Panels */}
       {activeTab === "Overview" && (
-        <>
-          {/* Overview cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">Target Output</div>
-              <div className="text-xl font-semibold">{(sc.unitsPerYear || 0).toLocaleString()}</div>
-              <div className="text-xs text-slate-400">units/year</div>
-            </div>
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">CapEx / OpEx</div>
-              <div className="text-lg font-medium">
-                ${overview.capex.toLocaleString()} / ${overview.opex.toLocaleString()}
-              </div>
-            </div>
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">CPU (OpEx only)</div>
-              <div className="text-xl font-semibold">${overview.cpu.toFixed(2)}</div>
-            </div>
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">Margin (est.)</div>
-              <div className="text-xl font-semibold">{overview.marginPct.toFixed(1)}%</div>
-            </div>
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">Projects</div>
-              <div className="text-lg font-medium">
-                {overview.totalProjects} total • {overview.onTrack} on track
-              </div>
-            </div>
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">Completed</div>
-              <div className="text-xl font-semibold">{overview.completed}</div>
-            </div>
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">Avg Takt (s)</div>
-              <div className="text-xl font-semibold">{overview.taktSecondsAvg}</div>
-            </div>
-            <div className="rounded-xl border p-4">
-              <div className="text-xs text-slate-500">KPI Avg</div>
-              <div className="text-xl font-semibold">{overview.kpiAvg}%</div>
-            </div>
+        <div className="grid xl:grid-cols-2 gap-4">
+          {/* Simple high-level charts substitute with totals */}
+          <div className="rounded border p-4">
+            <h3 className="font-medium mb-3">Performance Snapshot</h3>
+            <ul className="space-y-2 text-sm">
+              <li>Average KPI Performance: <b>{kpiAvg.toFixed(1)}%</b></li>
+              <li>CPU (OpEx only): <b>${cpu.toFixed(2)}</b></li>
+              <li>Projects on track: <b>{plan.projects.filter((p) => String(p?.[22] || "").toUpperCase() === "GREEN").length}</b></li>
+              <li>Risks open: <b>{plan.risks.length}</b></li>
+            </ul>
           </div>
-        </>
+
+          <div className="rounded border p-4">
+            <h3 className="font-medium mb-3">Financial Snapshot</h3>
+            <ul className="space-y-2 text-sm">
+              <li>CapEx: <b>${capexTotal.toLocaleString()}</b></li>
+              <li>OpEx: <b>${opexTotal.toLocaleString()}</b></li>
+              <li>Margin (est.): <b>{marginPct.toFixed(1)}%</b></li>
+            </ul>
+          </div>
+        </div>
       )}
 
       {activeTab === "Projects" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold flex items-center gap-2">
-              <TrendingUp className="h-5 w-5" />
-              Projects
-            </h2>
-            <div className="flex gap-2">
-              <Button onClick={addProject} className="gap-2">
-                <Plus className="h-4 w-4" />
-                Add Project
-              </Button>
-            </div>
+        <section className="mt-2">
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="font-semibold">Projects</h3>
+            <button onClick={addProject} className="rounded bg-slate-900 text-white px-3 py-2 text-sm">+ Add Project</button>
           </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {projectHeaders.map((h) => (
-                    <th
-                      key={h}
-                      className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left"
-                      style={{ position: "sticky", top: 0, zIndex: 1 }}
-                    >
-                      {h}
-                    </th>
+
+          <div className="overflow-x-auto rounded border">
+            <table className="min-w-[1200px] w-full text-sm">
+              <thead className="bg-slate-50 text-xs">
+                <tr className="[&>th]:px-2 [&>th]:py-2 [&>th]:text-left">
+                  {[
+                    "ID","Name","Type/Phase","MoSCoW","Owner","Start","Finish","Deps","Deliverables","Goal",
+                    "R","A","C","I","Needs","Barriers","Risks","Budget CapEx","Budget OpEx","Progress %","Process Link","Critical","Status","Slack Days","Actions","Notes"
+                  ].map((h) => (
+                    <th key={h} className="whitespace-nowrap">{h}</th>
                   ))}
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {projects.map((row, rIdx) => (
-                  <tr key={row?.[0] || rIdx}>
-                    {projectHeaders.map((_, cIdx) => {
-                      const isWide =
-                        [1, 8, 9, 14, 15, 16, 20].includes(cIdx); // long text columns
-                      const isDate = [5, 6].includes(cIdx);
-                      const isSelectMoSCoW = cIdx === 3;
-                      const isNumeric = [17, 18, 19, 23].includes(cIdx);
-
-                      if (isSelectMoSCoW) {
-                        return (
-                          <td key={cIdx} className="border align-top px-2 py-2">
-                            <select
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setProjectCell(rIdx, cIdx, e.target.value)}
-                              className="w-full border rounded px-2 py-1 text-sm"
-                            >
-                              {Array.from(MOSCOW).map((opt) => (
-                                <option key={opt} value={opt}>
-                                  {opt}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                        );
-                      }
-
-                      if (isDate) {
-                        return (
-                          <td key={cIdx} className="border align-top px-2 py-2">
-                            <input
-                              type="date"
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] || ""}
-                              onChange={(e) => setProjectCell(rIdx, cIdx, e.target.value)}
-                            />
-                          </td>
-                        );
-                      }
-
-                      if (isNumeric) {
-                        return (
-                          <td key={cIdx} className="border align-top px-2 py-2">
-                            <input
-                              type="number"
-                              className="w-full border rounded px-2 py-1 text-sm text-right"
-                              value={row?.[cIdx] ?? 0}
-                              onChange={(e) => setProjectCell(rIdx, cIdx, e.target.value)}
-                            />
-                          </td>
-                        );
-                      }
-
-                      const isStatus = cIdx === 22;
-                      if (isStatus) {
-                        return (
-                          <td key={cIdx} className="border align-top px-2 py-2">
-                            <select
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? "GREEN"}
-                              onChange={(e) => setProjectCell(rIdx, cIdx, e.target.value)}
-                            >
-                              <option value="GREEN">GREEN</option>
-                              <option value="AMBER">AMBER</option>
-                              <option value="RED">RED</option>
-                            </select>
-                          </td>
-                        );
-                      }
-
-                      const inputTag = isWide ? "textarea" : "input";
-                      const commonStyle: React.CSSProperties = {
-                        width: "100%",
-                        minWidth: isWide ? 280 : 140,
-                        maxWidth: isWide ? 520 : 240,
-                        whiteSpace: "normal",
-                        wordBreak: "break-word",
-                      };
-
+                {plan.projects.map((row, idx) => (
+                  <tr key={String(row?.[0] ?? idx)} className="[&>td]:px-2 [&>td]:py-2 border-t align-top">
+                    {row.map((cell, cIdx) => {
+                      const isNumber = typeof cell === "number";
+                      const inputType = cIdx === 5 || cIdx === 6 ? "date" : isNumber ? "number" : "text";
+                      const minW =
+                        cIdx === 1 ? "min-w-[220px]" :
+                        cIdx === 8 || cIdx === 9 || cIdx === 14 || cIdx === 15 || cIdx === 16 || cIdx === 24 || cIdx === 25 ? "min-w-[260px]" :
+                        "min-w-[110px]";
                       return (
-                        <td key={cIdx} className="border align-top px-2 py-2">
-                          {inputTag === "textarea" ? (
-                            <textarea
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              style={{ ...commonStyle, height: 72 }}
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setProjectCell(rIdx, cIdx, e.target.value)}
-                            />
-                          ) : (
-                            <input
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              style={commonStyle}
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setProjectCell(rIdx, cIdx, e.target.value)}
-                            />
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className="border px-2 py-2">
-                      <Button variant="destructive" size="sm" onClick={() => deleteProject(rIdx)} className="gap-2">
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {activeTab === "Processes" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Processes</h2>
-            <div className="flex gap-2">
-              <Button onClick={addProcess} className="gap-2">
-                <Plus className="h-4 w-4" />
-                Add Process
-              </Button>
-            </div>
-          </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {processHeaders.map((h) => (
-                    <th key={h} className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">
-                      {h}
-                    </th>
-                  ))}
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {processes.map((row, rIdx) => (
-                  <tr key={rIdx}>
-                    {processHeaders.map((_, cIdx) => {
-                      const isNumeric = [1, 2, 3, 4].includes(cIdx);
-                      const isWide = cIdx === 0;
-
-                      if (isNumeric) {
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <input
-                              type="number"
-                              className="w-full border rounded px-2 py-1 text-sm text-right"
-                              value={row?.[cIdx] ?? 0}
-                              onChange={(e) => setProcessCell(rIdx, cIdx, e.target.value)}
-                            />
-                          </td>
-                        );
-                      }
-
-                      return (
-                        <td key={cIdx} className="border px-2 py-2">
-                          {isWide ? (
-                            <textarea
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              style={{ minWidth: 260, height: 60 }}
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setProcessCell(rIdx, cIdx, e.target.value)}
-                            />
-                          ) : (
-                            <input
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setProcessCell(rIdx, cIdx, e.target.value)}
-                            />
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className="border px-2 py-2">
-                      <Button variant="destructive" size="sm" onClick={() => deleteProcess(rIdx)} className="gap-2">
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {activeTab === "Resources" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Resources</h2>
-            <div className="flex gap-2">
-              <Button onClick={addResource} className="gap-2">
-                <Plus className="h-4 w-4" />
-                Add Resource
-              </Button>
-            </div>
-          </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {resourcesHeaders.map((h) => (
-                    <th key={h} className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">
-                      {h}
-                    </th>
-                  ))}
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {resources.map((row, rIdx) => (
-                  <tr key={rIdx}>
-                    {resourcesHeaders.map((_, cIdx) => {
-                      const isNumeric = [2, 3].includes(cIdx);
-                      return (
-                        <td key={cIdx} className="border px-2 py-2">
+                        <td key={cIdx} className="whitespace-normal break-words">
                           <input
-                            type={isNumeric ? "number" : "text"}
-                            className="w-full border rounded px-2 py-1 text-sm"
-                            value={row?.[cIdx] ?? (isNumeric ? 0 : "")}
-                            onChange={(e) => setResourceCell(rIdx, cIdx, e.target.value)}
+                            className={`w-full border rounded px-2 py-1 text-sm ${minW}`}
+                            type={inputType}
+                            value={String(cell ?? "")}
+                            onChange={(e) => {
+                              const next = [...plan.projects];
+                              (next[idx] = [...next[idx]])[cIdx] =
+                                inputType === "number" ? Number(e.target.value) : e.target.value;
+                              updatePlan("projects", next);
+                            }}
                           />
                         </td>
                       );
                     })}
-                    <td className="border px-2 py-2">
-                      <Button variant="destructive" size="sm" onClick={() => deleteResource(rIdx)} className="gap-2">
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1273,112 +744,77 @@ Dashboard Version: v65
         </section>
       )}
 
-      {activeTab === "Risks" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Risks</h2>
-            <div className="flex gap-2">
-              <Button onClick={addRisk} className="gap-2">
-                <Plus className="h-4 w-4" />
-                Add Risk
-              </Button>
-            </div>
+      {activeTab === "Manufacturing" && (
+        <section className="mt-2">
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="font-semibold">Processes</h3>
+            <button onClick={addProcess} className="rounded bg-slate-900 text-white px-3 py-2 text-sm">+ Add Process</button>
           </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {risksHeaders.map((h) => (
-                    <th key={h} className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">
-                      {h}
-                    </th>
-                  ))}
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
+          <SimpleGrid
+            headers={["Process","Time (min)","Batch Size","Cycle (s)","Equipment","Status","Owner"]}
+            rows={plan.processes}
+            onChange={(rows) => updatePlan("processes", rows)}
+          />
+        </section>
+      )}
+
+      {activeTab === "Resources" && (
+        <section className="mt-2">
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="font-semibold">Resources</h3>
+            <button onClick={addResource} className="rounded bg-slate-900 text-white px-3 py-2 text-sm">+ Add Resource</button>
+          </div>
+          <SimpleGrid
+            headers={["Resource","Type","Quantity","Cost","Department","Notes"]}
+            rows={plan.resources}
+            onChange={(rows) => updatePlan("resources", rows)}
+          />
+        </section>
+      )}
+
+      {activeTab === "Risks" && (
+        <section className="mt-2">
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="font-semibold">Risks</h3>
+            <button onClick={addRisk} className="rounded bg-slate-900 text-white px-3 py-2 text-sm">+ Add Risk</button>
+          </div>
+          <SimpleGrid
+            headers={["ID","Risk","Impact","Prob","Mitigation","Owner","Status","Notes"]}
+            rows={plan.risks}
+            onChange={(rows) => updatePlan("risks", rows)}
+          />
+        </section>
+      )}
+
+      {activeTab === "KPIs" && (
+        <section className="mt-2">
+          <h3 className="font-semibold mb-2">KPIs</h3>
+          <div className="rounded border overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs">
+                <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+                  <th>ID</th><th>Name</th><th>Unit</th><th>Owner</th><th>Target</th><th>Current</th>
                 </tr>
               </thead>
               <tbody>
-                {risks.map((row, rIdx) => (
-                  <tr key={rIdx}>
-                    {risksHeaders.map((_, cIdx) => {
-                      const isSelectImpact = cIdx === 2;
-                      const isSelectProb = cIdx === 3;
-                      const isDate = cIdx === 6;
-
-                      if (isSelectImpact) {
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <select
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? "M"}
-                              onChange={(e) => setRiskCell(rIdx, cIdx, e.target.value)}
-                            >
-                              {Array.from(IMPACT).map((opt) => (
-                                <option key={opt} value={opt}>
-                                  {opt}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                        );
-                      }
-
-                      if (isSelectProb) {
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <select
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? "M"}
-                              onChange={(e) => setRiskCell(rIdx, cIdx, e.target.value)}
-                            >
-                              {Array.from(PROB).map((opt) => (
-                                <option key={opt} value={opt}>
-                                  {opt}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                        );
-                      }
-
-                      if (isDate) {
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <input
-                              type="date"
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setRiskCell(rIdx, cIdx, e.target.value)}
-                            />
-                          </td>
-                        );
-                      }
-
-                      const isWide = cIdx === 1 || cIdx === 4;
-                      return (
-                        <td key={cIdx} className="border px-2 py-2">
-                          {isWide ? (
-                            <textarea
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              style={{ minWidth: 260, height: 60 }}
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setRiskCell(rIdx, cIdx, e.target.value)}
-                            />
-                          ) : (
-                            <input
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setRiskCell(rIdx, cIdx, e.target.value)}
-                            />
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className="border px-2 py-2">
-                      <Button variant="destructive" size="sm" onClick={() => deleteRisk(rIdx)} className="gap-2">
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
-                    </td>
+                {plan.kpis.map((k, i) => (
+                  <tr key={k.id} className="border-t [&>td]:px-3 [&>td]:py-2">
+                    <td className="text-slate-500">{k.id}</td>
+                    <td><input className="w-full border rounded px-2 py-1" value={k.name} onChange={(e)=> {
+                      const next=[...plan.kpis]; next[i]={...next[i], name:e.target.value}; updatePlan("kpis", next);
+                    }}/></td>
+                    <td><input className="w-full border rounded px-2 py-1" value={k.unit} onChange={(e)=> {
+                      const next=[...plan.kpis]; next[i]={...next[i], unit:e.target.value}; updatePlan("kpis", next);
+                    }}/></td>
+                    <td><input className="w-full border rounded px-2 py-1" value={k.owner} onChange={(e)=> {
+                      const next=[...plan.kpis]; next[i]={...next[i], owner:e.target.value}; updatePlan("kpis", next);
+                    }}/></td>
+                    <td><input type="number" className="w-full border rounded px-2 py-1" value={k.target_value} onChange={(e)=> {
+                      const next=[...plan.kpis]; next[i]={...next[i], target_value:Number(e.target.value)}; updatePlan("kpis", next);
+                    }}/></td>
+                    <td><input type="number" className="w-full border rounded px-2 py-1" value={k.current_value} onChange={(e)=> {
+                      const next=[...plan.kpis]; next[i]={...next[i], current_value:Number(e.target.value)}; updatePlan("kpis", next);
+                    }}/></td>
                   </tr>
                 ))}
               </tbody>
@@ -1388,338 +824,114 @@ Dashboard Version: v65
       )}
 
       {activeTab === "Financials" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Financials (Source of Truth for CapEx / OpEx)</h2>
-            <div className="flex gap-2">
-              <Button onClick={addFinancial} className="gap-2">
-                <Plus className="h-4 w-4" />
-                Add Row
-              </Button>
-            </div>
+        <section className="mt-2">
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="font-semibold">Financials (Source of Truth)</h3>
+            <button onClick={addFinancialRow} className="rounded bg-slate-900 text-white px-3 py-2 text-sm">+ Add Row</button>
           </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {financialHeaders.map((h) => (
-                    <th key={h} className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">
-                      {h}
-                    </th>
-                  ))}
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
+
+          <div className="rounded border overflow-x-auto">
+            <table className="w-full min-w-[1000px] text-sm">
+              <thead className="bg-slate-50 text-xs">
+                <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+                  <th>Category</th>
+                  <th>Item</th>
+                  <th>Amount</th>
+                  <th>Type</th>
+                  <th>Notes</th>
+                  <th>Scenario</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {financialData.map((row, rIdx) => (
-                  <tr key={rIdx}>
-                    {financialHeaders.map((h, cIdx) => {
-                      if (cIdx === 0) {
-                        // Category
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <select
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={String(row?.[0] ?? "OpEx")}
-                              onChange={(e) => setFinancialCell(rIdx, 0, e.target.value)}
-                            >
-                              <option>OpEx</option>
-                              <option>CapEx</option>
-                              <option>Revenue</option>
-                            </select>
-                          </td>
-                        );
-                      }
-
-                      if (cIdx === 2) {
-                        // Amount (number)
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <input
-                              type="number"
-                              className="w-full border rounded px-2 py-1 text-sm text-right"
-                              value={row?.[2] ?? 0}
-                              onChange={(e) => setFinancialCell(rIdx, 2, e.target.value)}
-                            />
-                          </td>
-                        );
-                      }
-
-                      if (cIdx === 5) {
-                        // Scenario selector (optional)
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <select
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={String(row?.[5] ?? "Both")}
-                              onChange={(e) => setFinancialCell(rIdx, 5, e.target.value)}
-                            >
-                              <option>Both</option>
-                              <option>50k</option>
-                              <option>200k</option>
-                            </select>
-                          </td>
-                        );
-                      }
-
-                      // Other text columns
-                      const isWide = cIdx === 1 || cIdx === 4;
-                      return (
-                        <td key={cIdx} className="border px-2 py-2">
-                          {isWide ? (
-                            <textarea
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              style={{ minWidth: 240, height: 60 }}
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setFinancialCell(rIdx, cIdx, e.target.value)}
-                            />
-                          ) : (
-                            <input
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) => setFinancialCell(rIdx, cIdx, e.target.value)}
-                            />
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className="border px-2 py-2">
-                      <Button variant="destructive" size="sm" onClick={() => deleteFinancial(rIdx)} className="gap-2">
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
+                {plan.financials.map((r, i) => (
+                  <tr key={r.id} className="border-t [&>td]:px-3 [&>td]:py-2 align-top">
+                    <td>
+                      <select
+                        className="border rounded px-2 py-1"
+                        value={r.category}
+                        onChange={(e) => {
+                          const next = [...plan.financials];
+                          next[i] = { ...next[i], category: e.target.value as any };
+                          updatePlan("financials", next);
+                        }}
+                      >
+                        <option value="Revenue">Revenue</option>
+                        <option value="CapEx">CapEx</option>
+                        <option value="OpEx">OpEx</option>
+                      </select>
                     </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div className="rounded-lg border p-3">
-                <div className="text-xs text-slate-500">CapEx Total</div>
-                <div className="text-lg font-semibold">
-                  ${Number(capexSelected || 0).toLocaleString()} ({scenario})
-                </div>
-              </div>
-              <div className="rounded-lg border p-3">
-                <div className="text-xs text-slate-500">OpEx Total</div>
-                <div className="text-lg font-semibold">
-                  ${Number(opexSelected || 0).toLocaleString()} ({scenario})
-                </div>
-              </div>
-              <div className="rounded-lg border p-3">
-                <div className="text-xs text-slate-500">CPU (OpEx / Units)</div>
-                <div className="text-lg font-semibold">${cpu.toFixed(2)}</div>
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {activeTab === "KPIs" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">KPIs</h2>
-            <div className="flex gap-2">
-              <Button onClick={addKPI} className="gap-2">
-                <Plus className="h-4 w-4" />
-                Add KPI
-              </Button>
-            </div>
-          </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Name</th>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Current</th>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Target</th>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Unit</th>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Owner</th>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {kpis.map((k) => (
-                  <tr key={k.id}>
-                    <td className="border px-2 py-2">
-                      <input
-                        className="w-full border rounded px-2 py-1 text-sm"
-                        value={k.name}
-                        onChange={(e) => setKpiField(k.id, "name", e.target.value)}
+                    <td>
+                      <textarea
+                        className="w-full border rounded px-2 py-1 min-w-[240px] h-[36px]"
+                        value={r.item}
+                        onChange={(e) => {
+                          const next = [...plan.financials];
+                          next[i] = { ...next[i], item: e.target.value };
+                          updatePlan("financials", next);
+                        }}
                       />
                     </td>
-                    <td className="border px-2 py-2">
+                    <td>
                       <input
                         type="number"
-                        className="w-full border rounded px-2 py-1 text-sm text-right"
-                        value={k.current_value}
-                        onChange={(e) => setKpiField(k.id, "current_value", e.target.value)}
+                        className="w-[140px] border rounded px-2 py-1"
+                        value={r.amount}
+                        onChange={(e) => {
+                          const next = [...plan.financials];
+                          next[i] = { ...next[i], amount: Number(e.target.value) };
+                          updatePlan("financials", next);
+                        }}
                       />
                     </td>
-                    <td className="border px-2 py-2">
-                      <input
-                        type="number"
-                        className="w-full border rounded px-2 py-1 text-sm text-right"
-                        value={k.target_value}
-                        onChange={(e) => setKpiField(k.id, "target_value", e.target.value)}
+                    <td>
+                      <select
+                        className="border rounded px-2 py-1"
+                        value={r.type}
+                        onChange={(e) => {
+                          const next = [...plan.financials];
+                          next[i] = { ...next[i], type: e.target.value as any };
+                          updatePlan("financials", next);
+                        }}
+                      >
+                        <option value="Expense">Expense</option>
+                        <option value="Income">Income</option>
+                        <option value="Both">Both</option>
+                      </select>
+                    </td>
+                    <td>
+                      <textarea
+                        className="w-full border rounded px-2 py-1 min-w-[260px] h-[36px]"
+                        value={r.notes || ""}
+                        onChange={(e) => {
+                          const next = [...plan.financials];
+                          next[i] = { ...next[i], notes: e.target.value };
+                          updatePlan("financials", next);
+                        }}
                       />
                     </td>
-                    <td className="border px-2 py-2">
-                      <input
-                        className="w-full border rounded px-2 py-1 text-sm"
-                        value={k.unit}
-                        onChange={(e) => setKpiField(k.id, "unit", e.target.value)}
-                      />
+                    <td>
+                      <select
+                        className="border rounded px-2 py-1"
+                        value={r.scenario}
+                        onChange={(e) => {
+                          const next = [...plan.financials];
+                          next[i] = { ...next[i], scenario: e.target.value as any };
+                          updatePlan("financials", next);
+                        }}
+                      >
+                        <option value="Both">Both</option>
+                        <option value="50k">50k</option>
+                        <option value="200k">200k</option>
+                      </select>
                     </td>
-                    <td className="border px-2 py-2">
-                      <input
-                        className="w-full border rounded px-2 py-1 text-sm"
-                        value={k.owner}
-                        onChange={(e) => setKpiField(k.id, "owner", e.target.value)}
-                      />
-                    </td>
-                    <td className="border px-2 py-2">
-                      <Button variant="destructive" size="sm" onClick={() => deleteKPI(k.id)} className="gap-2">
-                        <Trash2 className="h-4 w-4" />
+                    <td>
+                      <button
+                        onClick={() => removeFinancialRow(i)}
+                        className="text-red-600 border rounded px-2 py-1"
+                      >
                         Delete
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      )}
-
-      {activeTab === "Meetings" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Project Meetings</h2>
-            <div className="flex gap-2">
-              <Button onClick={openNewMeetingModal} className="gap-2">
-                <CalendarPlus className="h-4 w-4" />
-                Schedule Meeting
-              </Button>
-            </div>
-          </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  {[
-                    "ID",
-                    "Title",
-                    "Date",
-                    "Time",
-                    "Duration",
-                    "Attendees",
-                    "Location",
-                    "Status",
-                    "Agenda",
-                    "Objectives",
-                    "Notes",
-                  ].map((h) => (
-                    <th key={h} className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">
-                      {h}
-                    </th>
-                  ))}
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {meetings.map((row, rIdx) => (
-                  <tr key={row?.[0] || rIdx}>
-                    {Array.from({ length: 11 }).map((_, cIdx) => {
-                      const isDate = cIdx === 2;
-                      const isTime = cIdx === 3;
-                      const isWide = cIdx === 8 || cIdx === 10;
-
-                      if (isDate) {
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <input
-                              type="date"
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) =>
-                                setMeetings((prev) => {
-                                  const next = [...prev];
-                                  next[rIdx][cIdx] = e.target.value;
-                                  return next;
-                                })
-                              }
-                            />
-                          </td>
-                        );
-                      }
-                      if (isTime) {
-                        return (
-                          <td key={cIdx} className="border px-2 py-2">
-                            <input
-                              type="time"
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) =>
-                                setMeetings((prev) => {
-                                  const next = [...prev];
-                                  next[rIdx][cIdx] = e.target.value;
-                                  return next;
-                                })
-                              }
-                            />
-                          </td>
-                        );
-                      }
-
-                      return (
-                        <td key={cIdx} className="border px-2 py-2">
-                          {isWide ? (
-                            <textarea
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              style={{ minWidth: 260, height: 60 }}
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) =>
-                                setMeetings((prev) => {
-                                  const next = [...prev];
-                                  next[rIdx][cIdx] = e.target.value;
-                                  return next;
-                                })
-                              }
-                            />
-                          ) : (
-                            <input
-                              className="w-full border rounded px-2 py-1 text-sm"
-                              value={row?.[cIdx] ?? ""}
-                              onChange={(e) =>
-                                setMeetings((prev) => {
-                                  const next = [...prev];
-                                  next[rIdx][cIdx] = e.target.value;
-                                  return next;
-                                })
-                              }
-                            />
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td className="border px-2 py-2">
-                      <div className="flex gap-2">
-                        <Button size="sm" variant="outline" onClick={() => openEditMeetingModal(rIdx)}>
-                          Edit
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => exportMeetingSummary(rIdx)}>
-                          Export
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="destructive"
-                          onClick={() => setMeetings((prev) => prev.filter((_, i) => i !== rIdx))}
-                        >
-                          Delete
-                        </Button>
-                      </div>
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -1730,190 +942,202 @@ Dashboard Version: v65
       )}
 
       {activeTab === "Glossary" && (
-        <section className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Glossary</h2>
-            <div className="flex gap-2">
-              <Button
-                onClick={() => setGlossary((prev) => [...prev, ["New Term", "Definition"]])}
-                className="gap-2"
-              >
-                <Plus className="h-4 w-4" />
-                Add Term
-              </Button>
-            </div>
+        <section className="mt-2">
+          <h3 className="font-semibold mb-2">Glossary</h3>
+          <SimpleGrid
+            headers={["Term","Definition"]}
+            rows={plan.glossary}
+            onChange={(rows) => updatePlan("glossary", rows)}
+          />
+        </section>
+      )}
+
+      {activeTab === "Meetings" && (
+        <section className="mt-2">
+          <div className="flex justify-between items-center mb-2">
+            <h3 className="font-semibold">Meetings</h3>
+            <button onClick={openNewMeetingModal} className="rounded bg-slate-900 text-white px-3 py-2 text-sm">
+              + Schedule Meeting
+            </button>
           </div>
-          <div className="w-full overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Term</th>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Definition</th>
-                  <th className="border bg-slate-50 text-slate-700 text-xs font-medium px-2 py-2 text-left">Actions</th>
+
+          <div className="rounded border overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 text-xs">
+                <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+                  <th>ID</th><th>Title</th><th>Date</th><th>Time</th><th>Duration</th><th>Attendees</th><th>Location</th><th>Status</th>
+                  <th>Agenda</th><th>Objectives</th><th>Notes</th><th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {glossary.map((row, rIdx) => (
-                  <tr key={rIdx}>
-                    <td className="border px-2 py-2">
-                      <input
-                        className="w-full border rounded px-2 py-1 text-sm"
-                        value={row?.[0] ?? ""}
-                        onChange={(e) =>
-                          setGlossary((prev) => {
-                            const next = [...prev];
-                            next[rIdx][0] = e.target.value;
-                            return next;
-                          })
-                        }
-                      />
-                    </td>
-                    <td className="border px-2 py-2">
-                      <textarea
-                        className="w-full border rounded px-2 py-1 text-sm"
-                        style={{ minWidth: 260, height: 60 }}
-                        value={row?.[1] ?? ""}
-                        onChange={(e) =>
-                          setGlossary((prev) => {
-                            const next = [...prev];
-                            next[rIdx][1] = e.target.value;
-                            return next;
-                          })
-                        }
-                      />
-                    </td>
-                    <td className="border px-2 py-2">
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => setGlossary((prev) => prev.filter((_, i) => i !== rIdx))}
-                        className="gap-2"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                        Delete
-                      </Button>
+                {plan.meetings.map((m, i) => (
+                  <tr key={String(m?.[0] ?? i)} className="border-t [&>td]:px-3 [&>td]:py-2 align-top">
+                    {m.slice(0, 11).map((cell: any, cIdx: number) => (
+                      <td key={cIdx} className="whitespace-normal break-words">
+                        <div className={cIdx >= 8 ? "min-w-[240px]" : "min-w-[120px]"}>{String(cell ?? "")}</div>
+                      </td>
+                    ))}
+                    <td className="space-x-2">
+                      <button className="border rounded px-2 py-1" onClick={() => openEditMeetingModal(i)}>Edit</button>
+                      <button className="border rounded px-2 py-1" onClick={() => exportMeetingSummary(i)}>Export PDF</button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+
+          {/* Modal */}
+          {showMeetingModal && (
+            <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+              <div className="bg-white rounded shadow-xl max-w-3xl w-full">
+                <div className="p-4 border-b flex justify-between items-center">
+                  <h4 className="font-semibold">{editingMeetingIndex === null ? "Schedule Meeting" : "Edit Meeting"}</h4>
+                  <button onClick={() => setShowMeetingModal(false)} className="text-slate-500">✕</button>
+                </div>
+                <div className="p-4 grid md:grid-cols-2 gap-3">
+                  {[
+                    ["Title","title"],["Date","date"],["Time","time"],["Duration","duration"],
+                    ["Attendees","attendees"],["Location","location"],["Status","status"],
+                  ].map(([label,key]) => (
+                    <label key={key} className="text-sm space-y-1">
+                      <span className="block text-slate-600">{label}</span>
+                      <input
+                        className="w-full border rounded px-2 py-1"
+                        type={key==="date"?"date":"text"}
+                        value={(meetingForm as any)[key]}
+                        onChange={(e)=> setMeetingForm((f)=> ({...f,[key]: e.target.value}))}
+                      />
+                    </label>
+                  ))}
+                  <label className="md:col-span-2 text-sm space-y-1">
+                    <span className="block text-slate-600">Agenda</span>
+                    <textarea
+                      className="w-full border rounded px-2 py-1 h-28"
+                      value={meetingForm.agenda}
+                      onChange={(e)=> setMeetingForm((f)=> ({...f, agenda: e.target.value}))}
+                    />
+                  </label>
+                  <label className="md:col-span-2 text-sm space-y-1">
+                    <span className="block text-slate-600">Objectives</span>
+                    <textarea
+                      className="w-full border rounded px-2 py-1 h-20"
+                      value={meetingForm.objectives}
+                      onChange={(e)=> setMeetingForm((f)=> ({...f, objectives: e.target.value}))}
+                    />
+                  </label>
+                  <label className="md:col-span-2 text-sm space-y-1">
+                    <span className="block text-slate-600">Notes</span>
+                    <textarea
+                      className="w-full border rounded px-2 py-1 h-28"
+                      value={meetingForm.notes}
+                      onChange={(e)=> setMeetingForm((f)=> ({...f, notes: e.target.value}))}
+                    />
+                  </label>
+                </div>
+                <div className="p-4 border-t flex justify-end gap-2">
+                  <button onClick={()=> setShowMeetingModal(false)} className="border rounded px-3 py-2">Cancel</button>
+                  <button onClick={saveMeetingFromModal} className="bg-slate-900 text-white rounded px-3 py-2">
+                    {editingMeetingIndex === null ? "Create" : "Save"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       )}
 
-      {/* Meeting Modal (global) */}
-      {showMeetingModal && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold">{editingMeetingIndex === null ? "Schedule Meeting" : "Edit Meeting"}</h3>
-              <Button variant="ghost" onClick={() => setShowMeetingModal(false)}>
-                Close
-              </Button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label className="text-xs text-slate-500">Title</label>
-                <input
-                  className="w-full border rounded px-2 py-1"
-                  value={meetingForm.title}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, title: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-500">Date</label>
-                <input
-                  type="date"
-                  className="w-full border rounded px-2 py-1"
-                  value={meetingForm.date}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, date: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-500">Time</label>
-                <input
-                  type="time"
-                  className="w-full border rounded px-2 py-1"
-                  value={meetingForm.time}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, time: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-500">Duration</label>
-                <input
-                  className="w-full border rounded px-2 py-1"
-                  value={meetingForm.duration}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, duration: e.target.value }))}
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-xs text-slate-500">Attendees</label>
-                <input
-                  className="w-full border rounded px-2 py-1"
-                  value={meetingForm.attendees}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, attendees: e.target.value }))}
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-xs text-slate-500">Location</label>
-                <input
-                  className="w-full border rounded px-2 py-1"
-                  value={meetingForm.location}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, location: e.target.value }))}
-                />
-              </div>
-              <div>
-                <label className="text-xs text-slate-500">Status</label>
-                <select
-                  className="w-full border rounded px-2 py-1"
-                  value={meetingForm.status}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, status: e.target.value }))}
-                >
-                  <option>Scheduled</option>
-                  <option>Completed</option>
-                  <option>Cancelled</option>
-                </select>
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-xs text-slate-500">Objectives</label>
-                <textarea
-                  className="w-full border rounded px-2 py-1"
-                  rows={2}
-                  value={meetingForm.objectives}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, objectives: e.target.value }))}
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-xs text-slate-500">Agenda</label>
-                <textarea
-                  className="w-full border rounded px-2 py-1"
-                  rows={3}
-                  value={meetingForm.agenda}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, agenda: e.target.value }))}
-                />
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-xs text-slate-500">Notes</label>
-                <textarea
-                  className="w-full border rounded px-2 py-1"
-                  rows={4}
-                  value={meetingForm.notes}
-                  onChange={(e) => setMeetingForm((s) => ({ ...s, notes: e.target.value }))}
-                />
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-2 pt-2">
-              <Button variant="outline" onClick={() => setShowMeetingModal(false)}>
-                Cancel
-              </Button>
-              <Button onClick={saveMeetingFromModal} className="gap-2">
-                <Save className="h-4 w-4" />
-                Save Meeting
-              </Button>
-            </div>
+      {activeTab === "Config" && (
+        <section className="mt-2">
+          <h3 className="font-semibold mb-2">Config</h3>
+          <div className="grid md:grid-cols-3 gap-3">
+            <label className="text-sm space-y-1">
+              <span className="block text-slate-600">Variant Name</span>
+              <input className="border rounded px-2 py-1 w-full" value={plan.variant} onChange={(e)=> updatePlan("variant", e.target.value)} />
+            </label>
+            <label className="text-sm space-y-1">
+              <span className="block text-slate-600">Units / Year ({scenario})</span>
+              <input
+                type="number"
+                className="border rounded px-2 py-1 w-full"
+                value={scenarioSettings.unitsPerYear ?? 0}
+                onChange={(e) => {
+                  const next = { ...(plan.scenarios || {}) };
+                  next[scenario] = { ...(next[scenario] || {}), unitsPerYear: Number(e.target.value) };
+                  updatePlan("scenarios", next as any);
+                }}
+              />
+            </label>
+            <label className="text-sm space-y-1">
+              <span className="block text-slate-600">Shifts ({scenario})</span>
+              <input
+                type="number"
+                className="border rounded px-2 py-1 w-full"
+                value={scenarioSettings.shifts ?? 1}
+                onChange={(e) => {
+                  const next = { ...(plan.scenarios || {}) };
+                  next[scenario] = { ...(next[scenario] || {}), shifts: Number(e.target.value) };
+                  updatePlan("scenarios", next as any);
+                }}
+              />
+            </label>
           </div>
-        </div>
+        </section>
       )}
+    </div>
+  );
+}
+
+/* -------------------------------- Subcomponents ------------------------------- */
+
+function StatCard({ title, value, suffix }: { title: string; value: string; suffix?: string }) {
+  return (
+    <div className="rounded border p-3">
+      <div className="text-xs text-slate-500">{title}</div>
+      <div className="text-lg font-semibold">{value} {suffix ? <span className="text-slate-500 font-normal text-sm">{suffix}</span> : null}</div>
+    </div>
+  );
+}
+
+function SimpleGrid({
+  headers,
+  rows,
+  onChange,
+}: {
+  headers: string[];
+  rows: AnyRow[];
+  onChange: (rows: AnyRow[]) => void;
+}) {
+  return (
+    <div className="rounded border overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead className="bg-slate-50 text-xs">
+          <tr className="[&>th]:px-3 [&>th]:py-2 [&>th]:text-left">
+            {headers.map((h) => (
+              <th key={h}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i} className="border-t align-top">
+              {headers.map((_, j) => (
+                <td key={j} className="px-3 py-2">
+                  <input
+                    className={`w-full border rounded px-2 py-1 text-sm ${j === 0 ? "min-w-[200px]" : "min-w-[120px]"} whitespace-normal break-words`}
+                    value={String(r?.[j] ?? "")}
+                    onChange={(e) => {
+                      const next = [...rows];
+                      (next[i] = [...(next[i] || [])])[j] = e.target.value;
+                      onChange(next);
+                    }}
+                  />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
